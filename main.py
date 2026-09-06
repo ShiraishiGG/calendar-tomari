@@ -401,8 +401,7 @@ async def backup_reminders(ctx: commands.Context):
     buf = io.BytesIO(data.encode("utf-8"))
     filename = f"reminders_backup_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}.txt"
     await ctx.reply(
-        f"現在の{len(reminders)}件をバックアップしたよ。中身は直接編集もできるよ。"
-        "再デプロイ後は、このファイルを添付して `!restore` と送ってね。",
+        f"現在の{len(reminders)}件をバックアップしたよ。",
         file=discord.File(buf, filename=filename),
     )
 
