@@ -364,17 +364,6 @@ BACKUP_LINE_RE = re.compile(
 def _format_backup_text(reminder_list: list) -> str:
     lines = [
         "# リマインドバックアップ",
-        f"# 出力日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M')}",
-        "#",
-        "# 【編集方法】",
-        "# ・日時(YYYY/MM/DD HH:MM)とメッセージ本文(最後の | より後ろ)は自由に書き換えてOK",
-        "# ・24時以降の時刻(25:00など)も書けます(自動的に翌日扱いになります)",
-        "# ・行ごと削除すればそのリマインドは復元されない(=キャンセル)",
-        "# ・user:/channel:/guild:/msgid: の部分は基本触らないこと(誰宛て・どこに送るかの情報)",
-        "# ・新しく追加したい場合は、似た行をコピーして日時とメッセージだけ書き換える",
-        "#   (user/channel/guildは同じ人・同じチャンネルの行から流用する必要があります)",
-        "# ・#で始まる行と空行は無視されます",
-        "#",
         "# [ID] 日時 | user:送信者ID channel:チャンネルID guild:サーバーID msgid:元メッセージID | メッセージ本文",
         "",
     ]
