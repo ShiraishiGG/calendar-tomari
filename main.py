@@ -6,6 +6,7 @@ Discord カレンダー(リマインド)Bot
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -94,7 +95,7 @@ def parse_reminder(content: str, now: datetime):
         minute = int(minute_s) if minute_s is not None else 0
         year = now.year
         try:
-            dt = datetime(year, month, day, hour, minute, tzinfo=JST)
+            dt = datetime(year, month, day, tzinfo=JST) + timedelta(hours=hour, minutes=minute)
         except ValueError:
             return None
         if dt <= now:
@@ -115,8 +116,25 @@ def parse_reminder(content: str, now: datetime):
         base_date = (now + timedelta(days=RELATIVE_DAYS[rel])).date()
         try:
             dt = datetime(
-                base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=JST
-            )
+                base_date.year, base_date.month, base_date.day, tzinfo=JST
+            ) + timedelta(hours=hour, minutes=minute)
+        except ValueError:
+            return None
+        return dt, text.strip()
+
+    # 2b. 今日/明日/明後日/明々後日 + の? + HH:MM メッセージ (「明日の20:25」「今日の23:30」形式)
+    m = re.match(
+        r"^(今日|明日|明後日|明々後日)の?(\d{1,2}):(\d{2})\s+(\S.*)$", content
+    )
+    if m:
+        rel, hour_s, minute_s, text = m.groups()
+        hour = int(hour_s)
+        minute = int(minute_s)
+        base_date = (now + timedelta(days=RELATIVE_DAYS[rel])).date()
+        try:
+            dt = datetime(
+                base_date.year, base_date.month, base_date.day, tzinfo=JST
+            ) + timedelta(hours=hour, minutes=minute)
         except ValueError:
             return None
         return dt, text.strip()
@@ -135,7 +153,8 @@ def parse_reminder(content: str, now: datetime):
         hour_s, minute_s, text = m.groups()
         hour, minute = int(hour_s), int(minute_s)
         try:
-            dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            dt = base + timedelta(hours=hour, minutes=minute)
         except ValueError:
             return None
         if dt <= now:
@@ -321,6 +340,143 @@ async def cancel_reminder(ctx: commands.Context, reminder_id: int):
     reminders = [r for r in reminders if r is not target]
     save_reminders(reminders)
     await ctx.reply(f"ID:{reminder_id}は忘れるね")
+
+
+def _is_duplicate_reminder(candidate: dict, existing: list) -> bool:
+    """再デプロイ後に同じバックアップを二重で !restore してしまった場合の重複防止"""
+    return any(
+        e["user_id"] == candidate["user_id"]
+        and e.get("message_id") == candidate.get("message_id")
+        and e["remind_at"] == candidate["remind_at"]
+        and e["message"] == candidate["message"]
+        for e in existing
+    )
+
+
+# 人間が編集しやすいバックアップ用フォーマット:
+#   [ID] YYYY/MM/DD HH:MM | user:xxx channel:xxx guild:xxx msgid:xxx | メッセージ本文
+BACKUP_LINE_RE = re.compile(
+    r"^\[(\d+)\]\s+(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})\s*\|\s*"
+    r"user:(\d+)\s+channel:(\d+)\s+guild:(\S+)\s+msgid:(\S+)\s*\|\s*(.+)$"
+)
+
+
+def _format_backup_text(reminder_list: list) -> str:
+    lines = [
+        "# リマインドバックアップ",
+        f"# 出力日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M')}",
+        "#",
+        "# 【編集方法】",
+        "# ・日時(YYYY/MM/DD HH:MM)とメッセージ本文(最後の | より後ろ)は自由に書き換えてOK",
+        "# ・24時以降の時刻(25:00など)も書けます(自動的に翌日扱いになります)",
+        "# ・行ごと削除すればそのリマインドは復元されない(=キャンセル)",
+        "# ・user:/channel:/guild:/msgid: の部分は基本触らないこと(誰宛て・どこに送るかの情報)",
+        "# ・新しく追加したい場合は、似た行をコピーして日時とメッセージだけ書き換える",
+        "#   (user/channel/guildは同じ人・同じチャンネルの行から流用する必要があります)",
+        "# ・#で始まる行と空行は無視されます",
+        "#",
+        "# [ID] 日時 | user:送信者ID channel:チャンネルID guild:サーバーID msgid:元メッセージID | メッセージ本文",
+        "",
+    ]
+    for r in sorted(reminder_list, key=lambda r: r["remind_at"]):
+        dt = datetime.fromisoformat(r["remind_at"])
+        lines.append(
+            f"[{r['id']}] {dt.strftime('%Y/%m/%d %H:%M')} | "
+            f"user:{r['user_id']} channel:{r['channel_id']} "
+            f"guild:{r.get('guild_id')} msgid:{r.get('message_id')} | {r['message']}"
+        )
+    return "\n".join(lines)
+
+
+@bot.command(name="backup")
+async def backup_reminders(ctx: commands.Context):
+    """現在登録されている全リマインドを、人が編集できるtxt形式で出力する。
+    再デプロイ(git push)前にこれを実行し、出力されたファイルを保存しておくと、
+    再デプロイ後に !restore でそのファイルを読み込んで復元できる。
+    """
+    if not reminders:
+        await ctx.reply("バックアップするリマインドが無いよ")
+        return
+    data = _format_backup_text(reminders)
+    buf = io.BytesIO(data.encode("utf-8"))
+    filename = f"reminders_backup_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}.txt"
+    await ctx.reply(
+        f"現在の{len(reminders)}件をバックアップしたよ。中身は直接編集もできるよ。"
+        "再デプロイ後は、このファイルを添付して `!restore` と送ってね。",
+        file=discord.File(buf, filename=filename),
+    )
+
+
+@bot.command(name="restore")
+async def restore_reminders(ctx: commands.Context):
+    """!backup で出力した(または手で編集した)txtファイルを添付して送ると、内容をリマインドに復元(マージ)する。"""
+    global reminders
+    if not ctx.message.attachments:
+        await ctx.reply("バックアップしたtxtファイルを添付して送ってね")
+        return
+
+    attachment = ctx.message.attachments[0]
+    try:
+        raw = await attachment.read()
+        text = raw.decode("utf-8")
+    except Exception:
+        log.exception("バックアップファイルの読み込みに失敗しました")
+        await ctx.reply("読み込みに失敗した…ファイルが壊れてるかも")
+        return
+
+    added = 0
+    skipped = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        m = BACKUP_LINE_RE.match(line)
+        if not m:
+            skipped += 1
+            continue
+
+        (
+            _old_id,
+            year_s, month_s, day_s, hour_s, minute_s,
+            user_s, channel_s, guild_s, msgid_s,
+            text_body,
+        ) = m.groups()
+
+        try:
+            remind_at = datetime(
+                int(year_s), int(month_s), int(day_s), tzinfo=JST
+            ) + timedelta(hours=int(hour_s), minutes=int(minute_s))
+            candidate = {
+                "user_id": int(user_s),
+                "channel_id": int(channel_s),
+                "guild_id": None if guild_s == "None" else int(guild_s),
+                "remind_at": remind_at.isoformat(),
+                "message": text_body.strip(),
+                "created_at": datetime.now(JST).isoformat(),
+                "message_id": None if msgid_s == "None" else int(msgid_s),
+            }
+        except Exception:
+            skipped += 1
+            continue  # 書式が壊れている行はスキップ
+
+        if not candidate["message"]:
+            skipped += 1
+            continue
+
+        if _is_duplicate_reminder(candidate, reminders):
+            skipped += 1
+            continue
+
+        candidate["id"] = next_id()
+        reminders.append(candidate)
+        added += 1
+
+    save_reminders(reminders)
+    msg = f"{added}件のリマインドを復元したよ"
+    if skipped:
+        msg += f"(重複/不正な{skipped}件はスキップ)"
+    await ctx.reply(msg)
 
 
 @tasks.loop(seconds=20)
