@@ -1,6 +1,6 @@
 """
 Discord カレンダー(リマインド)Bot
-- 「9/7 10:00 買い物にいく」「明日10時 散髪」のようなメッセージを送ると
+- 「9/7 10:00 買い物にいく」のようなメッセージを送ると
   指定日時になったら送信者にメンションしてメッセージを通知する。
 - Render にデプロイするための簡易HTTPサーバー(PORT)を同時に起動する。
 """
@@ -47,7 +47,7 @@ CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
 # (先頭のキーワードが確認メッセージの例文表示に使われます)
 CANCEL_KEYWORDS = [
     kw.strip()
-    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ,とけ").split(",")
+    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ,とけ,ミス,みす").split(",")
     if kw.strip()
 ]
 CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
