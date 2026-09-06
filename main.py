@@ -51,6 +51,14 @@ CANCEL_KEYWORDS = [
 ]
 CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
 
+# このメッセージを送ると予約中リマインド一覧を表示する(カンマ区切りで複数指定可能)
+LIST_KEYWORDS = [
+    kw.strip()
+    for kw in os.environ.get("LIST_KEYWORDS", "今の予定,予定確認,予定一覧").split(",")
+    if kw.strip()
+]
+
+
 JST = ZoneInfo("Asia/Tokyo")
 
 RELATIVE_DAYS = {
@@ -205,6 +213,11 @@ async def on_message(message: discord.Message):
         await cancel_by_reply(message)
         return
 
+    # 「今の予定」などで予約中リマインド一覧を表示
+    if message.content.strip() in LIST_KEYWORDS:
+        await show_reminders_in_chat(message)
+        return
+
     now = datetime.now(JST)
     parsed = parse_reminder(message.content, now)
     if parsed is None:
@@ -264,6 +277,19 @@ async def cancel_by_reply(message: discord.Message):
     await message.reply(
         f"はーい"
     )
+  
+async def show_reminders_in_chat(message: discord.Message):
+    """「今の予定」などのキーワードで呼ばれる一覧表示(!remindersと同内容)"""
+    mine = [r for r in reminders if r["user_id"] == message.author.id]
+    if not mine:
+        await message.reply("何も無いよ")
+        return
+    mine.sort(key=lambda r: r["remind_at"])
+    lines = []
+    for r in mine:
+        dt = datetime.fromisoformat(r["remind_at"])
+        lines.append(f"[ID:{r['id']}] {dt.strftime('%Y/%m/%d %H:%M')} - {r['message']}")
+    await message.reply("\n".join(lines))
 
 
 @bot.command(name="reminders")
