@@ -307,7 +307,7 @@ async def show_reminders_in_chat(message: discord.Message):
     lines = []
     for r in mine:
         dt = datetime.fromisoformat(r["remind_at"])
-        lines.append(f"[ID:{r['id']}] {dt.strftime('%Y/%m/%d %H:%M')} - {r['message']}")
+        lines.append(f"{dt.strftime('%Y/%m/%d %H:%M')} - {r['message']}")
     await message.reply("\n".join(lines))
 
 
