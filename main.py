@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -41,6 +42,24 @@ REGISTER_CHANNEL_ID = int(REGISTER_CHANNEL_ID) if REGISTER_CHANNEL_ID else None
 
 # 登録成功時に元メッセージへ付与するリアクション絵文字
 CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
+
+# このキーワードでリプライすると、リプライ先に対応する予約をキャンセルする
+# (先頭のキーワードが確認メッセージの例文表示に使われます)
+CANCEL_KEYWORDS = [
+    kw.strip()
+    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ").split(",")
+    if kw.strip()
+]
+CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
+
+# 登録確認メッセージの冒頭にランダムで添える一言(カンマ区切りで複数指定可能)
+CONFIRM_MESSAGES = [
+    m.strip()
+    for m in os.environ.get(
+        "CONFIRM_MESSAGES", "はーい,わすれないでね？,OK,覚えておくね,忘れたらごめんね"
+    ).split(",")
+    if m.strip()
+]
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -182,6 +201,11 @@ async def on_message(message: discord.Message):
     if REGISTER_CHANNEL_ID and message.channel.id != REGISTER_CHANNEL_ID:
         return
 
+    # 予約メッセージ or Botの確認メッセージへの「やっぱなし」リプライでキャンセル
+    if message.reference is not None and message.content.strip() in CANCEL_KEYWORDS:
+        await cancel_by_reply(message)
+        return
+
     now = datetime.now(JST)
     parsed = parse_reminder(message.content, now)
     if parsed is None:
@@ -197,9 +221,10 @@ async def on_message(message: discord.Message):
         "remind_at": remind_at.isoformat(),
         "message": text,
         "created_at": now.isoformat(),
+        "message_id": message.id,  # 元メッセージのID(リプライキャンセル判定用)
+        "confirm_message_id": None,  # Botの確認返信メッセージID(後で設定)
     }
     reminders.append(reminder)
-    save_reminders(reminders)
 
     # 登録完了の合図としてリアクションを付与
     if CONFIRM_EMOJI:
@@ -212,8 +237,46 @@ async def on_message(message: discord.Message):
     if NOTIFY_CHANNEL_ID and NOTIFY_CHANNEL_ID != message.channel.id:
         channel_note = f" (通知先: <#{NOTIFY_CHANNEL_ID}>)"
 
+    greeting = random.choice(CONFIRM_MESSAGES) if CONFIRM_MESSAGES else ""
+    greeting_line = f"{greeting}\n" if greeting else ""
+
+    sent = await message.reply()
+
+    reminder["confirm_message_id"] = sent.id
+    save_reminders(reminders)
+
+
+async def cancel_by_reply(message: discord.Message):
+    """リプライ先メッセージに対応する予約を、リプライしたユーザー自身の予約に限りキャンセルする"""
+    global reminders
+    ref_id = message.reference.message_id
+    target = next(
+        (
+            r
+            for r in reminders
+            if r["user_id"] == message.author.id
+            and (r.get("message_id") == ref_id or r.get("confirm_message_id") == ref_id)
+        ),
+        None,
+    )
+    if target is None:
+        await message.reply(
+            "なんのこと？"
+        )
+        return
+
+    reminders = [r for r in reminders if r is not target]
+    save_reminders(reminders)
+
+    if CANCEL_EMOJI:
+        try:
+            await message.add_reaction(CANCEL_EMOJI)
+        except Exception:
+            log.exception("リアクション付与に失敗しました")
+
+    remind_at = datetime.fromisoformat(target["remind_at"])
     await message.reply(
-        f"はーい"
+        f"忘れるね"
     )
 
 
