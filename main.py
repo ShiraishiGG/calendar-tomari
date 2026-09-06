@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -52,10 +53,39 @@ CANCEL_KEYWORDS = [
 ]
 CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
 
+# 「<ID><キャンセルキーワード>」の形式でメッセージを送るとそのIDのリマインドをキャンセルする
+# 例: "11トケ" "8やっぱなし" ( 「今の予定」で表示されるIDを指定する )
+CANCEL_BY_ID_RE = re.compile(
+    r"^(\d+)\s*(?:" + "|".join(re.escape(kw) for kw in CANCEL_KEYWORDS) + r")$"
+)
+
+
 # このメッセージを送ると予約中リマインド一覧を表示する(カンマ区切りで複数指定可能)
 LIST_KEYWORDS = [
     kw.strip()
     for kw in os.environ.get("LIST_KEYWORDS", "今の予定,予定確認,予定一覧").split(",")
+    if kw.strip()
+]
+
+# 「!backup」「!restore」を実行できる管理者のDiscordユーザーID(カンマ区切り)。
+# restoreは外部から偽のリマインドを注入できてしまうため、実行できる人を限定する。
+ADMIN_USER_IDS = {
+    int(uid.strip())
+    for uid in os.environ.get("ADMIN_USER_IDS", "").split(",")
+    if uid.strip()
+}
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_USER_IDS
+
+# Botがメンションされたらランダムで返信する内容(カンマ区切りで複数指定可能)。
+# チャンネル制限(REGISTER_CHANNEL_ID)に関係なく、どのチャンネルでも反応する。
+MENTION_REPLIES = [
+    kw.strip()
+    for kw in os.environ.get(
+        "MENTION_REPLIES", "用も無いのに呼ぶなんてサイテー,存在する私？"
+    ).split(",")
     if kw.strip()
 ]
 
@@ -227,46 +257,72 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # 登録を受け付けるチャンネルを固定している場合、それ以外は無視する
-    if REGISTER_CHANNEL_ID and message.channel.id != REGISTER_CHANNEL_ID:
+    # 判定チャンネル: REGISTER_CHANNEL_ID未設定ならどこでも、設定していればそのチャンネルのみ
+    is_register_channel = (
+        REGISTER_CHANNEL_ID is None or message.channel.id == REGISTER_CHANNEL_ID
+    )
+    mentioned = bot.user in message.mentions
+
+    # 判定チャンネル以外では、Botへのメンションが無いメッセージは無視する
+    if not is_register_channel and not mentioned:
         return
 
+    # メンションされている場合は、本文からメンション部分を取り除いたものを判定対象にする
+    content = message.content
+    if mentioned:
+        content = (
+            content.replace(f"<@{bot.user.id}>", "")
+            .replace(f"<@!{bot.user.id}>", "")
+        )
+        content = re.sub(r"\s+", " ", content).strip()
+
     # 予約メッセージ or Botの確認メッセージへの「やっぱなし」リプライでキャンセル
-    if message.reference is not None and message.content.strip() in CANCEL_KEYWORDS:
+    if message.reference is not None and content in CANCEL_KEYWORDS:
         await cancel_by_reply(message)
         return
 
+    # 「<ID><キャンセルキーワード>」でIDを指定してキャンセル (例: "11トケ" "8やっぱなし")
+    m = CANCEL_BY_ID_RE.match(content)
+    if m:
+        await cancel_by_id_text(message, int(m.group(1)))
+        return
+
     # 「今の予定」などで予約中リマインド一覧を表示
-    if message.content.strip() in LIST_KEYWORDS:
+    if content in LIST_KEYWORDS:
         await show_reminders_in_chat(message)
         return
 
     now = datetime.now(JST)
-    parsed = parse_reminder(message.content, now)
-    if parsed is None:
-        return  # リマインド形式でなければ何もしない(通常のチャットを邪魔しない)
+    parsed = parse_reminder(content, now)
+    if parsed is not None:
+        remind_at, text = parsed
 
-    remind_at, text = parsed
+        reminder = {
+            "id": next_id(),
+            "user_id": message.author.id,
+            "channel_id": message.channel.id,
+            "guild_id": message.guild.id if message.guild else None,
+            "remind_at": remind_at.isoformat(),
+            "message": text,
+            "created_at": now.isoformat(),
+            "message_id": message.id,  # 元メッセージのID(リプライキャンセル判定用)
+        }
+        reminders.append(reminder)
+        save_reminders(reminders)
 
-    reminder = {
-        "id": next_id(),
-        "user_id": message.author.id,
-        "channel_id": message.channel.id,
-        "guild_id": message.guild.id if message.guild else None,
-        "remind_at": remind_at.isoformat(),
-        "message": text,
-        "created_at": now.isoformat(),
-        "message_id": message.id,  # 元メッセージのID(リプライキャンセル判定用)
-    }
-    reminders.append(reminder)
-    save_reminders(reminders)
+        # 登録完了の合図としてリアクションのみ付与(テキスト返信はしない)
+        if CONFIRM_EMOJI:
+            try:
+                await message.add_reaction(CONFIRM_EMOJI)
+            except Exception:
+                log.exception("リアクション付与に失敗しました")
+        return
 
-    # 登録完了の合図としてリアクションのみ付与(テキスト返信はしない)
-    if CONFIRM_EMOJI:
-        try:
-            await message.add_reaction(CONFIRM_EMOJI)
-        except Exception:
-            log.exception("リアクション付与に失敗しました")
+    # ここまでのどれにも当てはまらなかった場合:
+    # メンションされていればランダムに雑談返信、そうでなければ何もしない
+    # (判定チャンネルでの通常チャットを邪魔しないため)
+    if mentioned and MENTION_REPLIES:
+        await message.channel.send(random.choice(MENTION_REPLIES))
 
 
 async def cancel_by_reply(message: discord.Message):
@@ -300,6 +356,34 @@ async def cancel_by_reply(message: discord.Message):
     await message.reply(
         f"はーい"
     )
+
+
+async def cancel_by_id_text(message: discord.Message, reminder_id: int):
+    """「<ID><キャンセルキーワード>」形式のメッセージで、自分自身の予約に限りキャンセルする"""
+    global reminders
+    target = next(
+        (
+            r
+            for r in reminders
+            if r["id"] == reminder_id and r["user_id"] == message.author.id
+        ),
+        None,
+    )
+    if target is None:
+        await message.reply(f"ID:{reminder_id}は知らない話")
+        return
+
+    reminders = [r for r in reminders if r is not target]
+    save_reminders(reminders)
+
+    if CANCEL_EMOJI:
+        try:
+            await message.add_reaction(CANCEL_EMOJI)
+        except Exception:
+            log.exception("リアクション付与に失敗しました")
+
+    await message.reply(f"ID:{reminder_id}は忘れるね")
+
   
 async def show_reminders_in_chat(message: discord.Message):
     """「今の予定」などのキーワードで呼ばれる一覧表示(!remindersと同内容)"""
@@ -311,7 +395,9 @@ async def show_reminders_in_chat(message: discord.Message):
     lines = []
     for r in mine:
         dt = datetime.fromisoformat(r["remind_at"])
-        lines.append(f"{dt.strftime('%Y/%m/%d %H:%M')} - {r['message']}")
+        lines.append(f"[{r['id']}] {dt.strftime('%Y/%m/%d %H:%M')} - {r['message']}")
+    cancel_example = CANCEL_KEYWORDS[0] if CANCEL_KEYWORDS else "キャンセル"
+    lines.append(f"\nキャンセルするには「ID+{cancel_example}」(例: {mine[0]['id']}{cancel_example})")
     await message.reply("\n".join(lines))
 
 
@@ -368,6 +454,7 @@ BACKUP_LINE_RE = re.compile(
 def _format_backup_text(reminder_list: list) -> str:
     lines = [
         "# リマインドバックアップ",
+        f"# 出力日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M')}",
         "# [ID] 日時 | user:送信者ID channel:チャンネルID guild:サーバーID msgid:元メッセージID | メッセージ本文",
         "",
     ]
@@ -383,26 +470,47 @@ def _format_backup_text(reminder_list: list) -> str:
 
 @bot.command(name="backup")
 async def backup_reminders(ctx: commands.Context):
-    """現在登録されている全リマインドを、人が編集できるtxt形式で出力する。
-    再デプロイ(git push)前にこれを実行し、出力されたファイルを保存しておくと、
-    再デプロイ後に !restore でそのファイルを読み込んで復元できる。
+    """現在登録されている全リマインドを、人が編集できるtxt形式で管理者のDMに送る。
+    再デプロイ(git push)前にこれを実行しておくと、再デプロイ後に !restore で復元できる。
+    悪用防止のため、ADMIN_USER_IDS に登録された管理者のみ実行できる。
     """
+    if not is_admin(ctx.author.id):
+        await ctx.reply("この操作は管理者のみ実行できるよ")
+        return
     if not reminders:
         await ctx.reply("バックアップするリマインドが無いよ")
         return
+
     data = _format_backup_text(reminders)
     buf = io.BytesIO(data.encode("utf-8"))
     filename = f"reminders_backup_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}.txt"
-    await ctx.reply(
-        f"現在の{len(reminders)}件をバックアップしたよ。",
-        file=discord.File(buf, filename=filename),
-    )
+
+    try:
+        await ctx.author.send(
+            f"現在の{len(reminders)}件をバックアップしたよ。中身は直接編集もできるよ。\n"
+            "再デプロイ後は、このファイルを添付してDMで `!restore` と送ってね。",
+            file=discord.File(buf, filename=filename),
+        )
+    except discord.Forbidden:
+        await ctx.reply(
+            "DMを送れなかった…サーバーの設定で「DMを許可する」をオンにしてからもう一度試してね"
+        )
+        return
+
+    # チャンネルには中身を残さない(DMに送った旨だけ伝える)
+    if ctx.guild is not None:
+        await ctx.reply("バックアップをDMに送ったよ")
 
 
 @bot.command(name="restore")
 async def restore_reminders(ctx: commands.Context):
-    """!backup で出力した(または手で編集した)txtファイルを添付して送ると、内容をリマインドに復元(マージ)する。"""
+    """!backup で出力した(または手で編集した)txtファイルを添付して送ると、内容をリマインドに復元(マージ)する。
+    悪用防止のため、ADMIN_USER_IDS に登録された管理者のみ実行できる。
+    """
     global reminders
+    if not is_admin(ctx.author.id):
+        await ctx.reply("この操作は管理者のみ実行できるよ")
+        return
     if not ctx.message.attachments:
         await ctx.reply("バックアップしたtxtファイルを添付して送ってね")
         return
