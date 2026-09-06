@@ -213,8 +213,7 @@ async def on_message(message: discord.Message):
         channel_note = f" (通知先: <#{NOTIFY_CHANNEL_ID}>)"
 
     await message.reply(
-        f"⏰ {remind_at.strftime('%Y/%m/%d %H:%M')} にお知らせします: 「{text}」"
-        f" (ID: {reminder['id']}){channel_note}"
+        f"はーい"
     )
 
 
