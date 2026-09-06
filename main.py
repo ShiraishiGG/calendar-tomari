@@ -47,7 +47,7 @@ CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
 # (先頭のキーワードが確認メッセージの例文表示に使われます)
 CANCEL_KEYWORDS = [
     kw.strip()
-    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ").split(",")
+    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ,とけ").split(",")
     if kw.strip()
 ]
 CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
