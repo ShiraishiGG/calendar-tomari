@@ -29,6 +29,19 @@ PORT = int(os.environ.get("PORT", "8080"))
 DATA_FILE = os.environ.get("REMINDERS_FILE", "reminders.json")
 COMMAND_PREFIX = os.environ.get("COMMAND_PREFIX", "!")
 
+# 通知(リマインド送信)を固定で行うチャンネルID。
+# 未設定の場合は従来通り「登録したチャンネル」に通知する。
+NOTIFY_CHANNEL_ID = os.environ.get("NOTIFY_CHANNEL_ID")
+NOTIFY_CHANNEL_ID = int(NOTIFY_CHANNEL_ID) if NOTIFY_CHANNEL_ID else None
+
+# リマインド登録を受け付けるチャンネルID。
+# 未設定の場合はどのチャンネルでも登録を受け付ける(従来動作)。
+REGISTER_CHANNEL_ID = os.environ.get("REGISTER_CHANNEL_ID")
+REGISTER_CHANNEL_ID = int(REGISTER_CHANNEL_ID) if REGISTER_CHANNEL_ID else None
+
+# 登録成功時に元メッセージへ付与するリアクション絵文字
+CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
+
 JST = ZoneInfo("Asia/Tokyo")
 
 RELATIVE_DAYS = {
@@ -165,6 +178,10 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # 登録を受け付けるチャンネルを固定している場合、それ以外は無視する
+    if REGISTER_CHANNEL_ID and message.channel.id != REGISTER_CHANNEL_ID:
+        return
+
     now = datetime.now(JST)
     parsed = parse_reminder(message.content, now)
     if parsed is None:
@@ -184,9 +201,20 @@ async def on_message(message: discord.Message):
     reminders.append(reminder)
     save_reminders(reminders)
 
+    # 登録完了の合図としてリアクションを付与
+    if CONFIRM_EMOJI:
+        try:
+            await message.add_reaction(CONFIRM_EMOJI)
+        except Exception:
+            log.exception("リアクション付与に失敗しました")
+
+    channel_note = ""
+    if NOTIFY_CHANNEL_ID and NOTIFY_CHANNEL_ID != message.channel.id:
+        channel_note = f" (通知先: <#{NOTIFY_CHANNEL_ID}>)"
+
     await message.reply(
         f"⏰ {remind_at.strftime('%Y/%m/%d %H:%M')} にお知らせします: 「{text}」"
-        f" (ID: {reminder['id']})"
+        f" (ID: {reminder['id']}){channel_note}"
     )
 
 
@@ -239,8 +267,9 @@ async def reminder_loop():
 
     for r in due:
         try:
-            channel = bot.get_channel(r["channel_id"]) or await bot.fetch_channel(
-                r["channel_id"]
+            target_channel_id = NOTIFY_CHANNEL_ID or r["channel_id"]
+            channel = bot.get_channel(target_channel_id) or await bot.fetch_channel(
+                target_channel_id
             )
             await channel.send(f"<@{r['user_id']}> {r['message']}")
         except Exception:
