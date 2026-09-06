@@ -84,7 +84,7 @@ def is_admin(user_id: int) -> bool:
 MENTION_REPLIES = [
     kw.strip()
     for kw in os.environ.get(
-        "MENTION_REPLIES", "用も無いのに呼ぶなんてサイテー,存在する私？"
+        "MENTION_REPLIES", "用も無いのに呼ぶなんてサイテー,存在する私？,存在する私？,存在する私？,存在する私？,剱岳買え！,https://ginban.co.jp/,剱岳買え！,https://ginban.co.jp/,剱岳買え！,https://ginban.co.jp/,こんうなうなー！,ありえなーい！"
     ).split(",")
     if kw.strip()
 ]
@@ -382,7 +382,7 @@ async def cancel_by_id_text(message: discord.Message, reminder_id: int):
         except Exception:
             log.exception("リアクション付与に失敗しました")
 
-    await message.reply(f"ID:{reminder_id}は忘れるね")
+    await message.reply(f"{reminder_id}は忘れるね")
 
   
 async def show_reminders_in_chat(message: discord.Message):
@@ -396,8 +396,6 @@ async def show_reminders_in_chat(message: discord.Message):
     for r in mine:
         dt = datetime.fromisoformat(r["remind_at"])
         lines.append(f"[{r['id']}] {dt.strftime('%Y/%m/%d %H:%M')} - {r['message']}")
-    cancel_example = CANCEL_KEYWORDS[0] if CANCEL_KEYWORDS else "キャンセル"
-    lines.append(f"\nキャンセルするには「ID+{cancel_example}」(例: {mine[0]['id']}{cancel_example})")
     await message.reply("\n".join(lines))
 
 
@@ -425,11 +423,11 @@ async def cancel_reminder(ctx: commands.Context, reminder_id: int):
         None,
     )
     if target is None:
-        await ctx.reply(f"ID:{reminder_id}は知らない話")
+        await ctx.reply(f"{reminder_id}は知らない話")
         return
     reminders = [r for r in reminders if r is not target]
     save_reminders(reminders)
-    await ctx.reply(f"ID:{reminder_id}は忘れるね")
+    await ctx.reply(f"{reminder_id}は忘れるね")
 
 
 def _is_duplicate_reminder(candidate: dict, existing: list) -> bool:
@@ -475,7 +473,7 @@ async def backup_reminders(ctx: commands.Context):
     悪用防止のため、ADMIN_USER_IDS に登録された管理者のみ実行できる。
     """
     if not is_admin(ctx.author.id):
-        await ctx.reply("この操作は管理者のみ実行できるよ")
+        await ctx.reply("権利ナシ！")
         return
     if not reminders:
         await ctx.reply("バックアップするリマインドが無いよ")
@@ -487,8 +485,8 @@ async def backup_reminders(ctx: commands.Context):
 
     try:
         await ctx.author.send(
-            f"現在の{len(reminders)}件をバックアップしたよ。中身は直接編集もできるよ。\n"
-            "再デプロイ後は、このファイルを添付してDMで `!restore` と送ってね。",
+            f"{len(reminders)}件をバックアップしたよ。"
+            "忘れずに`!restore`してね",
             file=discord.File(buf, filename=filename),
         )
     except discord.Forbidden:
@@ -509,10 +507,10 @@ async def restore_reminders(ctx: commands.Context):
     """
     global reminders
     if not is_admin(ctx.author.id):
-        await ctx.reply("この操作は管理者のみ実行できるよ")
+        await ctx.reply("権利ナシ！")
         return
     if not ctx.message.attachments:
-        await ctx.reply("バックアップしたtxtファイルを添付して送ってね")
+        await ctx.reply("バックアップはどこ？")
         return
 
     attachment = ctx.message.attachments[0]
