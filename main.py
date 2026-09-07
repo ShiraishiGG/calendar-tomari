@@ -1,3 +1,4 @@
+
 """
 Discord カレンダー(リマインド)Bot
 - 「9/7 10:00 買い物にいく」のようなメッセージを送ると
@@ -49,7 +50,7 @@ CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
 # (先頭のキーワードが確認メッセージの例文表示に使われます)
 CANCEL_KEYWORDS = [
     kw.strip()
-    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ,とけ,ミス,みす").split(",")
+    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,これやっぱなし,キャンセル,取り消し,トケ,とけ,ミス,みす").split(",")
     if kw.strip()
 ]
 CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
@@ -91,6 +92,49 @@ MENTION_REPLIES = [
 ]
 
 # ----------------------------------------------------------------------
+# ユーザーごとの「扱い方」「呼ばれ方」設定 (!unamoon でDM設定)
+# ----------------------------------------------------------------------
+
+USER_PREFS_FILE = os.environ.get("USER_PREFS_FILE", "user_prefs.json")
+
+# 名前付きリマインドを送る確率(Gemini APIに投げず.py側で判定してクレジットを節約する)
+NAME_REMINDER_PROBABILITY = float(os.environ.get("NAME_REMINDER_PROBABILITY", "0.1"))
+
+STYLE_LABELS = {
+    "polite": "丁寧に(敬語)",
+    "normal": "普通に(いまのまま)",
+    "rough": "適当に(雑に)",
+}
+STYLE_EMOJIS = {
+    "polite": "1️⃣",
+    "normal": "2️⃣",
+    "rough": "3️⃣",
+}
+EMOJI_STYLE_MAP = {v: k for k, v in STYLE_EMOJIS.items()}
+STYLE_NUMBER_MAP = {"1": "polite", "2": "normal", "3": "rough"}
+
+
+def load_user_prefs():
+    if not os.path.exists(USER_PREFS_FILE):
+        return {}
+    try:
+        with open(USER_PREFS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): v for k, v in data.items()}
+    except (json.JSONDecodeError, OSError):
+        log.warning("user_prefs.json の読み込みに失敗しました。空で開始します。")
+        return {}
+
+
+def save_user_prefs():
+    with open(USER_PREFS_FILE, "w", encoding="utf-8") as f:
+        json.dump(user_prefs, f, ensure_ascii=False, indent=2)
+
+
+user_prefs = load_user_prefs()
+
+
+# ----------------------------------------------------------------------
 # リマインド文言の言い換え (Gemini API + テンプレートフォールバック)
 # ----------------------------------------------------------------------
 # GEMINI_API_KEY が設定されていれば、送信のたびにGemini APIで会話っぽい一言に
@@ -101,12 +145,40 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GEMINI_TIMEOUT_SECONDS = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "5"))
 
-GEMINI_SYSTEM_PROMPT = (
-    "あなたはラフな敬語を使う女の子のDiscordの通知Botです。"
-    "ユーザーが登録した予定を、忘れていないか確認する一言に言い換えてください。"
-    "できれば予定を解釈し適切な返答で、1文だけ、指定がない限り相手を示すワードは不要、絵文字なし、20文字前後で。"
-    "前置きや説明・カギ括弧は付けず、言い換えた一言だけを返してください。"
-)
+# 「扱い方」設定(polite/normal/rough)ごとのペルソナ部分。
+# normalは従来のプロンプトと同じ(未設定ユーザーもこれが使われる)。
+STYLE_SYSTEM_PROMPTS = {
+    "polite": (
+        "あなたは丁寧な敬語を話すDiscordの通知Botです。"
+        "ユーザーが登録した予定を、忘れていないか確認する一言に丁寧な敬語で言い換えてください。"
+    ),
+    "normal": (
+        "あなたはラフな敬語を使う女の子のDiscordの通知Botです。"
+        "ユーザーが登録した予定を、忘れていないか確認する一言に言い換えてください。"
+    ),
+    "rough": (
+        "あなたはかなりぞんざいでタメ口・雑な話し方をする女の子のDiscordの通知Botです。"
+        "ユーザーが登録した予定を、忘れていないか確認する一言に雑に言い換えてください。"
+    ),
+}
+
+
+def _build_gemini_system_prompt(style: str, nickname_to_use: str | None) -> str:
+    """扱い方(style)と、今回名前を付けるかどうかでシステムプロンプトを組み立てる。"""
+    persona = STYLE_SYSTEM_PROMPTS.get(style, STYLE_SYSTEM_PROMPTS["normal"])
+    if nickname_to_use:
+        # 名前を付ける回だけ「相手を示すワードは不要」を外し、呼び方を明示する
+        return (
+            persona
+            + "できれば予定を解釈し適切な返答で、1文だけ、絵文字なし、20文字前後で。"
+            + f"また、相手のことを「{nickname_to_use}」と呼んで話しかけてください。"
+            + "前置きや説明・カギ括弧は付けず、言い換えた一言だけを返してください。"
+        )
+    return (
+        persona
+        + "できれば予定を解釈し適切な返答で、1文だけ、指定がない限り相手を示すワードは不要、絵文字なし、20文字前後で。"
+        + "前置きや説明・カギ括弧は付けず、言い換えた一言だけを返してください。"
+    )
 
 # テンプレートフォールバック用(カンマ区切りで複数指定可能。{text} に元の予定内容が入る)
 REMINDER_TEMPLATES = [
@@ -120,28 +192,44 @@ REMINDER_TEMPLATES = [
 ]
 
 
-def _fallback_phrase(text: str) -> str:
+def _fallback_phrase(text: str, nickname_to_use: str | None = None) -> str:
     if not REMINDER_TEMPLATES:
-        return text
-    try:
-        return random.choice(REMINDER_TEMPLATES).format(text=text)
-    except Exception:
-        return text
+        phrased = text
+    else:
+        try:
+            phrased = random.choice(REMINDER_TEMPLATES).format(text=text)
+        except Exception:
+            phrased = text
+    if nickname_to_use:
+        return f"{nickname_to_use}、{phrased}"
+    return phrased
 
 
-async def phrase_reminder_message(text: str) -> str:
+async def phrase_reminder_message(text: str, user_id: int | None = None) -> str:
     """リマインド本文を会話っぽく言い換える。
     Gemini APIが使えればそれを使い、未設定/失敗時はテンプレートにフォールバックする。
+
+    ユーザーが!unamoonで「呼ばれ方」を設定している場合、
+    (Gemini APIにわざわざ確率を判定させずクレジットを節約するため).py側の抽選で
+    NAME_REMINDER_PROBABILITY の確率でのみ、その名前を付けて呼びかける。
     """
+    prefs = user_prefs.get(str(user_id)) if user_id is not None else None
+    style = (prefs or {}).get("style", "normal")
+    nickname = (prefs or {}).get("nickname")
+
+    include_name = bool(nickname) and random.random() < NAME_REMINDER_PROBABILITY
+    nickname_to_use = nickname if include_name else None
+
     if not GEMINI_API_KEY:
-        return _fallback_phrase(text)
+        return _fallback_phrase(text, nickname_to_use)
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
+    system_prompt = _build_gemini_system_prompt(style, nickname_to_use)
     payload = {
-        "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"parts": [{"text": f"予定: {text}"}]}],
         "generationConfig": {"maxOutputTokens": 60, "temperature": 0.9},
     }
@@ -155,16 +243,16 @@ async def phrase_reminder_message(text: str) -> str:
                         "Gemini API 呼び出し失敗 (status=%s) のためテンプレートを使用します",
                         resp.status,
                     )
-                    return _fallback_phrase(text)
+                    return _fallback_phrase(text, nickname_to_use)
                 data = await resp.json()
 
         phrased = (
             data["candidates"][0]["content"]["parts"][0]["text"].strip()
         )
-        return phrased or _fallback_phrase(text)
+        return phrased or _fallback_phrase(text, nickname_to_use)
     except Exception:
         log.exception("Gemini API 呼び出し中にエラーが発生したためテンプレートを使用します")
-        return _fallback_phrase(text)
+        return _fallback_phrase(text, nickname_to_use)
 
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -507,6 +595,111 @@ async def cancel_reminder(ctx: commands.Context, reminder_id: int):
     await ctx.reply(f"{reminder_id}は忘れるね")
 
 
+@bot.command(name="unamoon")
+async def setup_persona(ctx: commands.Context):
+    """DMで「扱い方」と「呼ばれ方」を設定する"""
+    author = ctx.author
+
+    try:
+        dm = await author.create_dm()
+    except Exception:
+        log.exception("DMチャンネルの作成に失敗しました")
+        await ctx.reply("DMを開けなかった…もう一度試してみて")
+        return
+
+    try:
+        prompt_msg = await dm.send(
+            "扱い方を選んでね！\n"
+            "1️⃣ 丁寧に(敬語)\n"
+            "2️⃣ 普通に(いまのまま)\n"
+            "3️⃣ 適当に(雑に)\n"
+            "リアクションか、数字(1・2・3)を送ってね"
+        )
+    except discord.Forbidden:
+        await ctx.reply(
+            "DMを送れなかった…サーバーの設定で「DMを許可する」をオンにしてからもう一度試してね"
+        )
+        return
+
+    if ctx.guild is not None:
+        await ctx.reply("DMを送ったよ、ナイショ話しようね")
+
+    for emoji in STYLE_EMOJIS.values():
+        try:
+            await prompt_msg.add_reaction(emoji)
+        except Exception:
+            log.exception("リアクション付与に失敗しました")
+
+    def reaction_check(reaction: discord.Reaction, user: discord.User) -> bool:
+        return (
+            user.id == author.id
+            and reaction.message.id == prompt_msg.id
+            and str(reaction.emoji) in EMOJI_STYLE_MAP
+        )
+
+    def style_message_check(m: discord.Message) -> bool:
+        return (
+            m.author.id == author.id
+            and isinstance(m.channel, discord.DMChannel)
+            and m.content.strip() in STYLE_NUMBER_MAP
+        )
+
+    reaction_task = asyncio.ensure_future(
+        bot.wait_for("reaction_add", check=reaction_check, timeout=120)
+    )
+    message_task = asyncio.ensure_future(
+        bot.wait_for("message", check=style_message_check, timeout=120)
+    )
+
+    style = None
+    try:
+        done, pending = await asyncio.wait(
+            {reaction_task, message_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        result = done.pop().result()
+        if isinstance(result, tuple):
+            # reaction_add イベント -> (reaction, user)
+            reaction, _user = result
+            style = EMOJI_STYLE_MAP[str(reaction.emoji)]
+        else:
+            # message イベント
+            style = STYLE_NUMBER_MAP[result.content.strip()]
+    except asyncio.TimeoutError:
+        await dm.send("おそーい！、また`!unamoon`で呼んでね")
+        return
+    except Exception:
+        log.exception("扱い方の選択待機中にエラーが発生しました")
+        await dm.send("頭こんがらがっちゃった…もう一度`!unamoon`で呼んでくれる...？")
+        return
+
+    await dm.send("なんて呼ばれたい？")
+
+    def name_message_check(m: discord.Message) -> bool:
+        return (
+            m.author.id == author.id
+            and isinstance(m.channel, discord.DMChannel)
+            and bool(m.content.strip())
+        )
+
+    try:
+        name_msg = await bot.wait_for("message", check=name_message_check, timeout=120)
+    except asyncio.TimeoutError:
+        await dm.send("ちょっと迷いすぎじゃない？、また`!unamoon`で呼んでね")
+        return
+
+    nickname = name_msg.content.strip()
+
+    user_prefs[str(author.id)] = {"style": style, "nickname": nickname}
+    save_user_prefs()
+
+    await dm.send(
+        f"接し方 {STYLE_EMOJIS[style]}\n"
+        f"じゃあ次から{nickname}って呼ぶね！\n"
+    )
+
+
 def _is_duplicate_reminder(candidate: dict, existing: list) -> bool:
     """再デプロイ後に同じバックアップを二重で !restore してしまった場合の重複防止"""
     return any(
@@ -525,8 +718,11 @@ BACKUP_LINE_RE = re.compile(
     r"user:(\d+)\s+channel:(\d+)\s+guild:(\S+)\s+msgid:(\S+)\s*\|\s*(.+)$"
 )
 
+# ユーザー設定(扱い方/呼ばれ方)行のフォーマット: USERPREF:user_id|style|呼び方
+USERPREF_LINE_RE = re.compile(r"^USERPREF:(\d+)\|(polite|normal|rough)\|(.*)$")
 
-def _format_backup_text(reminder_list: list) -> str:
+
+def _format_backup_text(reminder_list: list, prefs: dict) -> str:
     lines = [
         "# リマインドバックアップ",
         f"# 出力日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M')}",
@@ -540,6 +736,17 @@ def _format_backup_text(reminder_list: list) -> str:
             f"user:{r['user_id']} channel:{r['channel_id']} "
             f"guild:{r.get('guild_id')} msgid:{r.get('message_id')} | {r['message']}"
         )
+
+    lines.append("")
+    lines.append("# ユーザー設定 (!unamoonで設定した扱い方・呼ばれ方)")
+    lines.append("# USERPREF:user_id|style(polite/normal/rough)|呼び方")
+    for user_id, pref in sorted(prefs.items()):
+        style = pref.get("style", "normal")
+        nickname = pref.get("nickname", "")
+        if not nickname:
+            continue
+        lines.append(f"USERPREF:{user_id}|{style}|{nickname}")
+
     return "\n".join(lines)
 
 
@@ -552,17 +759,18 @@ async def backup_reminders(ctx: commands.Context):
     if not is_admin(ctx.author.id):
         await ctx.reply("権利ナシ！")
         return
-    if not reminders:
-        await ctx.reply("バックアップするリマインドが無いよ")
+    if not reminders and not user_prefs:
+        await ctx.reply("バックアップするものが無いよ")
         return
 
-    data = _format_backup_text(reminders)
+    data = _format_backup_text(reminders, user_prefs)
     buf = io.BytesIO(data.encode("utf-8"))
     filename = f"reminders_backup_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}.txt"
 
     try:
+        prefs_count = sum(1 for p in user_prefs.values() if p.get("nickname"))
         await ctx.author.send(
-            f"{len(reminders)}件をバックアップしたよ。"
+            f"予定{len(reminders)}件・設定{prefs_count}件をバックアップしたよ。"
             "忘れずに`!restore`してね",
             file=discord.File(buf, filename=filename),
         )
@@ -596,14 +804,26 @@ async def restore_reminders(ctx: commands.Context):
         text = raw.decode("utf-8")
     except Exception:
         log.exception("バックアップファイルの読み込みに失敗しました")
-        await ctx.reply("読み込みに失敗した…ファイルが壊れてるかも")
+        await ctx.reply("読み込みに失敗した…ファイルが壊れてるかも？")
         return
 
     added = 0
     skipped = 0
+    prefs_added = 0
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
+            continue
+
+        pref_m = USERPREF_LINE_RE.match(line)
+        if pref_m:
+            uid_s, style, nickname = pref_m.groups()
+            nickname = nickname.strip()
+            if not nickname:
+                skipped += 1
+                continue
+            user_prefs[uid_s] = {"style": style, "nickname": nickname}
+            prefs_added += 1
             continue
 
         m = BACKUP_LINE_RE.match(line)
@@ -648,7 +868,8 @@ async def restore_reminders(ctx: commands.Context):
         added += 1
 
     save_reminders(reminders)
-    msg = f"{added}件のリマインドを復元したよ"
+    save_user_prefs()
+    msg = f"予定{added}件・設定{prefs_added}件を復元したよ"
     if skipped:
         msg += f"(重複/不正な{skipped}件はスキップ)"
     await ctx.reply(msg)
@@ -676,7 +897,7 @@ async def reminder_loop():
             channel = bot.get_channel(target_channel_id) or await bot.fetch_channel(
                 target_channel_id
             )
-            phrased = await phrase_reminder_message(r["message"])
+            phrased = await phrase_reminder_message(r["message"], r["user_id"])
             await channel.send(f"<@{r['user_id']}> {phrased}")
         except Exception:
             log.exception("リマインド送信に失敗しました: %s", r)
