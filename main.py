@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
+import aiohttp
 from aiohttp import web
 from discord.ext import commands, tasks
 
@@ -88,6 +89,82 @@ MENTION_REPLIES = [
     ).split(",")
     if kw.strip()
 ]
+
+# ----------------------------------------------------------------------
+# リマインド文言の言い換え (Gemini API + テンプレートフォールバック)
+# ----------------------------------------------------------------------
+# GEMINI_API_KEY が設定されていれば、送信のたびにGemini APIで会話っぽい一言に
+# 言い換える。未設定/タイムアウト/エラー時は自動でテンプレートに切り替わるので、
+# APIが使えない状態でもリマインド送信自体は必ず行われる。
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
+GEMINI_TIMEOUT_SECONDS = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "5"))
+
+GEMINI_SYSTEM_PROMPT = (
+    "あなたは崩れた敬語を使う女の子のDiscordの通知Botです。"
+    "ユーザーが登録した予定を、忘れていないか確認する一言に言い換えてください。"
+    "できれば予定を解釈し適切な返答で、1文だけ、指定がない限り相手を示すワードは不要、絵文字なし、20文字前後で。"
+    "前置きや説明・カギ括弧は付けず、言い換えた一言だけを返してください。"
+)
+
+# テンプレートフォールバック用(カンマ区切りで複数指定可能。{text} に元の予定内容が入る)
+REMINDER_TEMPLATES = [
+    t.strip()
+    for t in os.environ.get(
+        "REMINDER_TEMPLATES",
+        "{text}、そろそろだよ,はいはい、{text}の時間ね,{text}、忘れてない？,"
+        "そろそろ{text}じゃないの？,{text}、今だよ",
+    ).split(",")
+    if t.strip()
+]
+
+
+def _fallback_phrase(text: str) -> str:
+    if not REMINDER_TEMPLATES:
+        return text
+    try:
+        return random.choice(REMINDER_TEMPLATES).format(text=text)
+    except Exception:
+        return text
+
+
+async def phrase_reminder_message(text: str) -> str:
+    """リマインド本文を会話っぽく言い換える。
+    Gemini APIが使えればそれを使い、未設定/失敗時はテンプレートにフォールバックする。
+    """
+    if not GEMINI_API_KEY:
+        return _fallback_phrase(text)
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": f"予定: {text}"}]}],
+        "generationConfig": {"maxOutputTokens": 60, "temperature": 0.9},
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    log.warning(
+                        "Gemini API 呼び出し失敗 (status=%s) のためテンプレートを使用します",
+                        resp.status,
+                    )
+                    return _fallback_phrase(text)
+                data = await resp.json()
+
+        phrased = (
+            data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        )
+        return phrased or _fallback_phrase(text)
+    except Exception:
+        log.exception("Gemini API 呼び出し中にエラーが発生したためテンプレートを使用します")
+        return _fallback_phrase(text)
 
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -599,7 +676,8 @@ async def reminder_loop():
             channel = bot.get_channel(target_channel_id) or await bot.fetch_channel(
                 target_channel_id
             )
-            await channel.send(f"<@{r['user_id']}> {r['message']}")
+            phrased = await phrase_reminder_message(r["message"])
+            await channel.send(f"<@{r['user_id']}> {phrased}")
         except Exception:
             log.exception("リマインド送信に失敗しました: %s", r)
 
