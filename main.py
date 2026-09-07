@@ -610,9 +610,9 @@ async def setup_persona(ctx: commands.Context):
     try:
         prompt_msg = await dm.send(
             "扱い方を選んでね！\n"
-            "1️⃣ 丁寧に(敬語)\n"
-            "2️⃣ 普通に(いまのまま)\n"
-            "3️⃣ 適当に(雑に)\n"
+            "1️⃣ 上司みたいに\n"
+            "2️⃣ ちょっと丁寧に(デフォルト)\n"
+            "3️⃣ 友達みたいに\n"
             "リアクションか、数字(1・2・3)を送ってね"
         )
     except discord.Forbidden:
