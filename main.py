@@ -1,4 +1,3 @@
-
 """
 Discord カレンダー(リマインド)Bot
 - 「9/7 10:00 買い物にいく」のようなメッセージを送ると
@@ -50,7 +49,7 @@ CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
 # (先頭のキーワードが確認メッセージの例文表示に使われます)
 CANCEL_KEYWORDS = [
     kw.strip()
-    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,これやっぱなし,キャンセル,取り消し,トケ,とけ,ミス,みす").split(",")
+    for kw in os.environ.get("CANCEL_KEYWORDS", "やっぱなし,キャンセル,取り消し,トケ,とけ,ミス,みす").split(",")
     if kw.strip()
 ]
 CANCEL_EMOJI = os.environ.get("CANCEL_EMOJI", "🆗")
@@ -264,6 +263,12 @@ RELATIVE_DAYS = {
     "明々後日": 3,
 }
 
+DURATION_UNIT_SECONDS = {
+    "秒": 1,
+    "分": 60,
+    "時間": 3600,
+}
+
 # ----------------------------------------------------------------------
 # 日時パース
 # ----------------------------------------------------------------------
@@ -304,9 +309,17 @@ def parse_reminder(content: str, now: datetime):
                 return None
         return dt, text.strip()
 
-    # 2. 今日/明日/明後日/明々後日 + H時[M分] メッセージ
+    m = re.match(r"^(\d+)\s*(秒|分|時間)(後)?(に|で)?(?:\s*(\S.*))?$", content)
+    if m:
+        amount_s, unit, _after, _particle, text = m.groups()
+        amount = int(amount_s)
+        seconds = amount * DURATION_UNIT_SECONDS[unit]
+        dt = now + timedelta(seconds=seconds)
+        return dt, (text or "").strip()
+
+    # 2. 今日/明日/明後日/明々後日 + H時[M分] + メッセージ(省略可)
     m = re.match(
-        r"^(今日|明日|明後日|明々後日)の?(\d{1,2})時(?:(\d{1,2})分)?\s*(\S.*)$", content
+        r"^(今日|明日|明後日|明々後日)の?(\d{1,2})時(?:(\d{1,2})分)?(?:\s+(\S.*))?$", content
     )
     if m:
         rel, hour_s, minute_s, text = m.groups()
@@ -319,7 +332,7 @@ def parse_reminder(content: str, now: datetime):
             ) + timedelta(hours=hour, minutes=minute)
         except ValueError:
             return None
-        return dt, text.strip()
+        return dt, (text or "").strip()
 
     # 2b. 今日/明日/明後日/明々後日 + の? + HH:MM メッセージ (「明日の20:25」「今日の23:30」形式)
     m = re.match(
@@ -360,7 +373,213 @@ def parse_reminder(content: str, now: datetime):
             dt += timedelta(days=1)
         return dt, text.strip()
 
+    # 5. H時[M分] メッセージ(省略可) (相対日の指定なし。時刻のみ。過去なら翌日)
+    #    例: "8時" "8時 レンジ止める" "20時30分" "20時30分 ご飯"
+    m = re.match(r"^(\d{1,2})時(?:(\d{1,2})分)?(?:\s+(\S.*))?$", content)
+    if m:
+        hour_s, minute_s, text = m.groups()
+        hour = int(hour_s)
+        minute = int(minute_s) if minute_s is not None else 0
+        try:
+            base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            dt = base + timedelta(hours=hour, minutes=minute)
+        except ValueError:
+            return None
+        if dt <= now:
+            dt += timedelta(days=1)
+        return dt, (text or "").strip()
+
     return None
+
+
+# ----------------------------------------------------------------------
+# メンション会話 (名前を呼ばれた反応 / 話しかけへの反応 / 2ターン目の相槌)
+# ----------------------------------------------------------------------
+# 「@bot」だけ            -> 名前を呼ばれた反応。MENTION_GEMINI_PROBABILITYの確率で生成、
+#                            外れたら従来通りMENTION_REPLIESからランダム(レパートリー/宣伝を兼ねる)。
+# 「@bot 話しかけ内容」    -> 内容に対する一言を考え、話しかけた本人からの
+#                            次の発言(60分以内・再メンション不要)を2ターン目として待つ。
+# 2ターン目                -> 1ターン目のやり取りを踏まえて締める。
+#
+# 会話機能自体はCHAT_CHANNEL_IDで1チャンネルに絞れる(未設定ならどこでも動作)。
+
+CHAT_CHANNEL_ID = os.environ.get("CHAT_CHANNEL_ID")
+CHAT_CHANNEL_ID = int(CHAT_CHANNEL_ID) if CHAT_CHANNEL_ID else None
+
+MENTION_GEMINI_PROBABILITY = float(os.environ.get("MENTION_GEMINI_PROBABILITY", "0.5"))
+MENTION_FOLLOWUP_TIMEOUT_MINUTES = int(os.environ.get("MENTION_FOLLOWUP_TIMEOUT_MINUTES", "60"))
+
+MENTION_CONTENT_FALLBACK = "え？なんて？"
+MENTION_FOLLOWUP_FALLBACK = "どういたしまして"
+
+# 話しかけた本人からの2ターン目だけを拾うための一時状態(永続化しない、再起動で消えてOK)。
+# user_id(str) -> {"channel_id": int, "original_text": str, "bot_reply": str, "expires_at": iso str}
+pending_mention_followups: dict[str, dict] = {}
+
+MENTION_STYLE_PROMPTS = {
+    "polite": "あなたは上司と話す女の子です。",
+    "normal": "あなたはラフな敬語を使う女の子です。",
+    "rough": "あなたは友達と話す女の子です。",
+}
+
+
+def _mention_persona(style: str) -> str:
+    return MENTION_STYLE_PROMPTS.get(style, MENTION_STYLE_PROMPTS["normal"])
+
+
+def _user_style(user_id: int) -> str:
+    prefs = user_prefs.get(str(user_id))
+    return (prefs or {}).get("style", "normal")
+
+
+async def _call_gemini(system_prompt: str, user_content: str, max_tokens: int = 60) -> str | None:
+    """Gemini APIを1回だけ叩いて短文を1つ生成する。未設定/失敗時はNone(呼び出し側でフォールバック)。"""
+    if not GEMINI_API_KEY:
+        return None
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"parts": [{"text": user_content}]}],
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.9},
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    log.warning("Gemini API 呼び出し失敗 (status=%s)", resp.status)
+                    return None
+                data = await resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text or None
+    except Exception:
+        log.exception("Gemini API 呼び出し中にエラーが発生しました")
+        return None
+
+
+async def _mention_called_reply(user_id: int) -> str:
+    """名前を呼ばれただけ(内容なし)の時の一言。
+    確率で外れた場合や生成失敗時は、従来通りMENTION_REPLIESから返す(出し尽くし対策+宣伝はこちらで担保)。
+    """
+    if MENTION_REPLIES and random.random() >= MENTION_GEMINI_PROBABILITY:
+        return random.choice(MENTION_REPLIES)
+
+    system_prompt = (
+        _mention_persona(_user_style(user_id))
+        + "名前を呼ばれた(メンションされた)ことに対する一言のリアクションだけを返してください。"
+        + "質問への回答ではなく、呼ばれたことへの反応です。1文だけ、絵文字なし、20文字前後で。"
+        + "前置きや説明は付けず、反応の一言だけを返してください。"
+    )
+    reply = await _call_gemini(system_prompt, "(メンションされた)")
+    if reply:
+        return reply
+    if MENTION_REPLIES:
+        return random.choice(MENTION_REPLIES)
+    return "呼んだ？"
+
+
+async def _mention_content_reply(user_id: int, content: str) -> str:
+    """メンション+内容(1ターン目)への返答を1文生成する"""
+    system_prompt = (
+        _mention_persona(_user_style(user_id))
+        + "話しかけられた内容に対して、一言だけ反応してください。"
+        + "具体的な手順や長い説明は書かず、素っ気なくても親身でも構わないので気の利いた一文で返してください。"
+        + "1文だけ、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
+    )
+    reply = await _call_gemini(system_prompt, content)
+    return reply or MENTION_CONTENT_FALLBACK
+
+
+async def _mention_followup_reply(
+    user_id: int, original_text: str, bot_reply: str, followup_text: str
+) -> str:
+    """2ターン目(相槌)を1文生成する"""
+    system_prompt = (
+        _mention_persona(_user_style(user_id))
+        + "直前の会話の流れを踏まえて、一言を考えてください。"
+        + "1文だけ、絵文字なし、これ以降のやり取りはありません、前置きや説明は付けず一言だけを返してください。"
+    )
+    user_content = (
+        f"1回目の相手の発言: {original_text}\n"
+        f"それに対するあなたの返答: {bot_reply}\n"
+        f"相手の返信: {followup_text}"
+    )
+    reply = await _call_gemini(system_prompt, user_content)
+    return reply or MENTION_FOLLOWUP_FALLBACK
+
+
+def _register_mention_followup(
+    user_id: int, channel_id: int, original_text: str, bot_reply: str
+) -> None:
+    expires_at = datetime.now(JST) + timedelta(minutes=MENTION_FOLLOWUP_TIMEOUT_MINUTES)
+    pending_mention_followups[str(user_id)] = {
+        "channel_id": channel_id,
+        "original_text": original_text,
+        "bot_reply": bot_reply,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+def _pop_valid_mention_followup(user_id: int, channel_id: int) -> dict | None:
+    """話しかけた本人・同じチャンネル・期限内であれば、待機中の2ターン目状態を取り出して消費する。
+    条件に合わなければNone(呼び出し元は通常のメッセージ処理を続ける = 他ユーザーの発言は無視される)。
+    """
+    key = str(user_id)
+    pending = pending_mention_followups.get(key)
+    if pending is None:
+        return None
+    if pending["channel_id"] != channel_id:
+        return None
+    if datetime.fromisoformat(pending["expires_at"]) <= datetime.now(JST):
+        pending_mention_followups.pop(key, None)
+        return None
+    pending_mention_followups.pop(key, None)
+    return pending
+
+
+def _looks_like_bot_command(content: str, now: datetime) -> bool:
+    """予定登録/キャンセル/一覧表示など、既存コマンドっぽいメッセージかどうか。
+    2ターン目待ちのユーザーがこれらを送った場合は、相槌より本来の処理を優先させるためのガード。
+    """
+    content = content.strip()
+    if not content:
+        return False
+    if content in CANCEL_KEYWORDS or content in LIST_KEYWORDS:
+        return True
+    if CANCEL_BY_ID_RE.match(content):
+        return True
+    if parse_reminder(content, now) is not None:
+        return True
+    return False
+
+
+async def handle_mention_chat(message: discord.Message, content: str) -> None:
+    """メンション時の会話処理をまとめて振り分ける(呼ばれただけ/内容あり)。"""
+    in_chat_channel = CHAT_CHANNEL_ID is None or message.channel.id == CHAT_CHANNEL_ID
+
+    if not content:
+        # 名前を呼ばれただけ
+        if in_chat_channel:
+            reply = await _mention_called_reply(message.author.id)
+            await message.channel.send(reply)
+        elif MENTION_REPLIES:
+            await message.channel.send(random.choice(MENTION_REPLIES))
+        return
+
+    if not in_chat_channel:
+        # 会話チャンネル以外では、内容があっても従来通りの雑談返信のみ
+        if MENTION_REPLIES:
+            await message.channel.send(random.choice(MENTION_REPLIES))
+        return
+
+    # メンション+内容(1ターン目): 話しかけ内容に反応し、本人からの2ターン目を待つ
+    reply = await _mention_content_reply(message.author.id, content)
+    await message.channel.send(reply)
+    _register_mention_followup(message.author.id, message.channel.id, content, reply)
 
 
 # ----------------------------------------------------------------------
@@ -421,6 +640,20 @@ async def on_message(message: discord.Message):
     if message.content.startswith(COMMAND_PREFIX):
         await bot.process_commands(message)
         return
+
+    # メンション会話の「2ターン目」判定(再メンション不要、話しかけた本人の発言のみ)。
+    # 予定登録/キャンセル/一覧表示コマンドっぽい内容なら、相槌より本来の処理を優先する。
+    if not _looks_like_bot_command(message.content, datetime.now(JST)):
+        followup = _pop_valid_mention_followup(message.author.id, message.channel.id)
+        if followup is not None:
+            reply = await _mention_followup_reply(
+                message.author.id,
+                followup["original_text"],
+                followup["bot_reply"],
+                message.content,
+            )
+            await message.channel.send(reply)
+            return
 
     # 判定チャンネル: REGISTER_CHANNEL_ID未設定ならどこでも、設定していればそのチャンネルのみ
     is_register_channel = (
@@ -484,10 +717,10 @@ async def on_message(message: discord.Message):
         return
 
     # ここまでのどれにも当てはまらなかった場合:
-    # メンションされていればランダムに雑談返信、そうでなければ何もしない
+    # メンションされていれば会話処理へ、そうでなければ何もしない
     # (判定チャンネルでの通常チャットを邪魔しないため)
-    if mentioned and MENTION_REPLIES:
-        await message.channel.send(random.choice(MENTION_REPLIES))
+    if mentioned:
+        await handle_mention_chat(message, content)
 
 
 async def cancel_by_reply(message: discord.Message):
@@ -604,15 +837,15 @@ async def setup_persona(ctx: commands.Context):
         dm = await author.create_dm()
     except Exception:
         log.exception("DMチャンネルの作成に失敗しました")
-        await ctx.reply("DMを開けなかった…もう一度試してみて")
+        await ctx.reply("DM送らせてよ～")
         return
 
     try:
         prompt_msg = await dm.send(
             "扱い方を選んでね！\n"
-            "1️⃣ 上司みたいに\n"
-            "2️⃣ ちょっと丁寧に(デフォルト)\n"
-            "3️⃣ 友達みたいに\n"
+            "1️⃣ 丁寧に(敬語)\n"
+            "2️⃣ 普通に(いまのまま)\n"
+            "3️⃣ 適当に(雑に)\n"
             "リアクションか、数字(1・2・3)を送ってね"
         )
     except discord.Forbidden:
@@ -622,7 +855,7 @@ async def setup_persona(ctx: commands.Context):
         return
 
     if ctx.guild is not None:
-        await ctx.reply("DMを送ったよ、ナイショ話しようね")
+        await ctx.reply("DM送ったよ、ナイショ話しようね")
 
     for emoji in STYLE_EMOJIS.values():
         try:
@@ -674,7 +907,7 @@ async def setup_persona(ctx: commands.Context):
         await dm.send("頭こんがらがっちゃった…もう一度`!unamoon`で呼んでくれる...？")
         return
 
-    await dm.send("なんて呼ばれたい？")
+    await dm.send("なんて呼んだらいい？")
 
     def name_message_check(m: discord.Message) -> bool:
         return (
@@ -686,7 +919,7 @@ async def setup_persona(ctx: commands.Context):
     try:
         name_msg = await bot.wait_for("message", check=name_message_check, timeout=120)
     except asyncio.TimeoutError:
-        await dm.send("ちょっと迷いすぎじゃない？、また`!unamoon`で呼んでね")
+        await dm.send("ちょっと迷いすぎじゃない？決まったら教えてね")
         return
 
     nickname = name_msg.content.strip()
@@ -696,7 +929,7 @@ async def setup_persona(ctx: commands.Context):
 
     await dm.send(
         f"接し方 {STYLE_EMOJIS[style]}\n"
-        f"じゃあ次から{nickname}って呼ぶね！\n"
+        f"呼び方 {nickname} で覚えたよ\n"
     )
 
 
@@ -760,7 +993,7 @@ async def backup_reminders(ctx: commands.Context):
         await ctx.reply("権利ナシ！")
         return
     if not reminders and not user_prefs:
-        await ctx.reply("バックアップするものが無いよ")
+        await ctx.reply("何も無いよ")
         return
 
     data = _format_backup_text(reminders, user_prefs)
@@ -782,7 +1015,7 @@ async def backup_reminders(ctx: commands.Context):
 
     # チャンネルには中身を残さない(DMに送った旨だけ伝える)
     if ctx.guild is not None:
-        await ctx.reply("バックアップをDMに送ったよ")
+        await ctx.reply("バックアップを送ったよ")
 
 
 @bot.command(name="restore")
@@ -804,7 +1037,7 @@ async def restore_reminders(ctx: commands.Context):
         text = raw.decode("utf-8")
     except Exception:
         log.exception("バックアップファイルの読み込みに失敗しました")
-        await ctx.reply("読み込みに失敗した…ファイルが壊れてるかも？")
+        await ctx.reply("読めない…ファイルが壊れてるかも？")
         return
 
     added = 0
