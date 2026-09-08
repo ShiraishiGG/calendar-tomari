@@ -225,8 +225,7 @@ REMINDER_TEMPLATES = [
     t.strip()
     for t in os.environ.get(
         "REMINDER_TEMPLATES",
-        "{text}、そろそろだよ,はいはい、{text}の時間ね,{text}、忘れてない？,"
-        "そろそろ{text}じゃないの？,{text}、今だよ",
+        "{text}、忘れてない？,{text}、今だよ",
     ).split(",")
     if t.strip()
 ]
