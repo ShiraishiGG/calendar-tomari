@@ -470,8 +470,8 @@ async def _mention_called_reply(user_id: int) -> str:
 
     system_prompt = (
         _mention_persona(_user_style(user_id))
-        + "名前を呼ばれた(メンションされた)ことに対する一言のリアクションだけを返してください。"
-        + "質問への回答ではなく、呼ばれたことへの反応です。1文だけ、絵文字なし、20文字前後で。"
+        + "名前を呼ばれたことに対する一言のリアクションだけを返してください。"
+        + "質問への回答ではなく、呼ばれたことへの反応です。句読点なし、1文だけ、絵文字なし、20文字前後で。"
         + "前置きや説明は付けず、反応の一言だけを返してください。"
     )
     reply = await _call_gemini(system_prompt, "(メンションされた)")
@@ -479,7 +479,7 @@ async def _mention_called_reply(user_id: int) -> str:
         return reply
     if MENTION_REPLIES:
         return random.choice(MENTION_REPLIES)
-    return "呼んだ？"
+    return "よんだ？"
 
 
 async def _mention_content_reply(user_id: int, content: str) -> str:
@@ -846,7 +846,7 @@ async def setup_persona(ctx: commands.Context):
             "1️⃣ 丁寧に(敬語)\n"
             "2️⃣ 普通に(いまのまま)\n"
             "3️⃣ 適当に(雑に)\n"
-            "リアクションか、数字(1・2・3)を送ってね"
+            "数字(1・2・3)を送ってね"
         )
     except discord.Forbidden:
         await ctx.reply(
