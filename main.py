@@ -488,7 +488,7 @@ async def _mention_content_reply(user_id: int, content: str) -> str:
         _mention_persona(_user_style(user_id))
         + "話しかけられた内容に対して、一言だけ反応してください。"
         + "具体的な手順や長い説明は書かず、素っ気なくても親身でも構わないので気の利いた一文で返してください。"
-        + "1文だけ、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
+        + "1文だけ、句読点なし、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
     )
     reply = await _call_gemini(system_prompt, content)
     return reply or MENTION_CONTENT_FALLBACK
@@ -501,7 +501,7 @@ async def _mention_followup_reply(
     system_prompt = (
         _mention_persona(_user_style(user_id))
         + "直前の会話の流れを踏まえて、一言を考えてください。"
-        + "1文だけ、絵文字なし、これ以降のやり取りはありません、前置きや説明は付けず一言だけを返してください。"
+        + "1文だけ、句読点なし、絵文字なし、これ以降のやり取りはありません、前置きや説明は付けず一言だけを返してください。"
     )
     user_content = (
         f"1回目の相手の発言: {original_text}\n"
