@@ -179,20 +179,32 @@ def _persona_prompt(style: str) -> str:
 
 
 def _build_gemini_system_prompt(style: str, nickname_to_use: str | None) -> str:
-    """扱い方(style)と、今回名前を付けるかどうかでシステムプロンプトを組み立てる。"""
-    persona = _persona_prompt(style) + "ユーザーが登録した予定を、忘れていないか確認する一言に言い換えてください。"
+    """扱い方(style)と、今回名前を付けるかどうかでシステムプロンプトを組み立てる。
+    原型率(元の予定文言をどれだけ残すか)を上げるため、意訳・要約はさせず
+    語尾や聞き方を変えるだけの軽い変換に留めるよう明示的に指示する。
+    """
+    persona = (
+        _persona_prompt(style)
+        + "ユーザーが登録した予定を、忘れていないか確認する一言に変換してください。"
+        + "予定の文言(単語・言い回し)はできるだけそのまま残し、大きく意訳したり"
+        + "全く別の言葉に置き換えたり要約したりしないでください。"
+        + "語尾や聞き方・語順を少し変えるだけで、自然な確認の一言になるようにしてください。"
+        + "例:「登録削除した？」→「ちゃんと登録削除した？」、"
+        + "「呼びだして」→「呼びだしてって言われたから呼んだよ」のように、"
+        + "元の言葉をそのまま活かしてください。"
+    )
     if nickname_to_use:
         # 名前を付ける回だけ「相手を示すワードは不要」を外し、呼び方を明示する
         return (
             persona
-            + "予定の内容を自動で分類し、それぞれに適したニュアンスで返答を生成。。1文だけ。絵文字なし。20文字前後で。"
+            + "1文だけ。絵文字なし。20文字前後で。"
             + f"また、相手のことを「{nickname_to_use}」と呼んで話しかけてください。"
-            + "前置きや説明・カギ括弧は付けず、言い換えた一言だけを返してください。"
+            + "前置きや説明・カギ括弧は付けず、変換した一言だけを返してください。"
         )
     return (
         persona
-        + "予定の内容を自動で分類し、それぞれに適したニュアンスで返答を生成、相手を示すワードは不要、絵文字なし、20文字前後で。"
-        + "前置きや説明・カギ括弧は付けず、言い換えた一言だけを返してください。"
+        + "相手を示すワードは不要、絵文字なし、20文字前後で。"
+        + "前置きや説明・カギ括弧は付けず、変換した一言だけを返してください。"
     )
 
 # テンプレートフォールバック用(カンマ区切りで複数指定可能。{text} に元の予定内容が入る)
@@ -428,9 +440,30 @@ MENTION_FOLLOWUP_TIMEOUT_MINUTES = int(os.environ.get("MENTION_FOLLOWUP_TIMEOUT_
 MENTION_CONTENT_FALLBACK = "え？なんて？"
 MENTION_FOLLOWUP_FALLBACK = "どういたしまして"
 
+# リマインド送信後、この単語が(部分一致で)含まれる返信が来たら
+# 「なんのリマインドだったか」を元の文言そのままに近い形で教える。
+RECALL_KEYWORDS = [
+    kw.strip()
+    for kw in os.environ.get(
+        "RECALL_KEYWORDS",
+        "なんのこと,なんの事,何のこと,なんだっけ,何だっけ,なんの話,何の話,なにそれ,何それ,なにこれ,何これ",
+    ).split(",")
+    if kw.strip()
+]
+
+
+def _is_recall_query(content: str) -> bool:
+    """リマインドの内容を聞き返すメッセージかどうかを判定する(部分一致)。"""
+    stripped = content.strip().strip("？?！!。.、,　 ")
+    if not stripped:
+        return False
+    return any(kw in stripped for kw in RECALL_KEYWORDS)
+
 # 話しかけた本人からの2ターン目だけを拾うための一時状態(永続化しない、再起動で消えてOK)。
-# user_id(str) -> {"channel_id": int, "original_text": str, "bot_reply": str, "expires_at": iso str}
-pending_mention_followups: dict[str, dict] = {}
+# user_id(str) -> [{"channel_id": int, "original_text": str, "bot_reply": str,
+#                    "expires_at": iso str, "kind": "chat" | "reminder"}, ...]
+# 1人が複数件のリマインドを同時に抱えられるよう、単一dictではなくリストで保持する。
+pending_mention_followups: dict[str, list[dict]] = {}
 
 def _user_style(user_id: int) -> str:
     prefs = user_prefs.get(str(user_id))
@@ -527,33 +560,83 @@ async def _mention_followup_reply(
     return reply or MENTION_FOLLOWUP_FALLBACK
 
 
+async def _reminder_recall_reply(user_id: int, original_text: str) -> str:
+    """リマインド送信後に「なんのこと？」と聞かれた時、元の予定の文言をほぼそのまま伝える。
+    こちらは会話の相槌(_mention_followup_reply)より原型率を高くしたいので、
+    専用のプロンプトで「言い換えず元の文言を使う」ことを強く指示する。
+    """
+    system_prompt = (
+        _persona_prompt(_user_style(user_id))
+        + "さっき送ったリマインドが何の予定だったか聞き返されました。"
+        + "元の予定の文言はできるだけそのまま使い、末尾に「のことだよ」「って言ってたやつ」"
+        + "のような短い一言を付け足すだけで答えてください。"
+        + "意訳・言い換え・要約はせず、元の文言をそのまま残してください。"
+        + "1文だけ、絵文字なし、前置きや説明は付けず答えの一言だけを返してください。"
+    )
+    reply = await _call_gemini(system_prompt, f"元の予定の文言: {original_text}")
+    return reply or f"{original_text}のことだよ"
+
+
 def _register_mention_followup(
-    user_id: int, channel_id: int, original_text: str, bot_reply: str
+    user_id: int,
+    channel_id: int,
+    original_text: str,
+    bot_reply: str,
+    kind: str = "chat",
 ) -> None:
-    expires_at = datetime.now(JST) + timedelta(minutes=MENTION_FOLLOWUP_TIMEOUT_MINUTES)
-    pending_mention_followups[str(user_id)] = {
-        "channel_id": channel_id,
-        "original_text": original_text,
-        "bot_reply": bot_reply,
-        "expires_at": expires_at.isoformat(),
-    }
+    key = str(user_id)
+    now = datetime.now(JST)
+    expires_at = now + timedelta(minutes=MENTION_FOLLOWUP_TIMEOUT_MINUTES)
+
+    # 登録のたびに、このユーザーの期限切れ分を掃除してからリストに追加する
+    # (返信が来ないまま溜まり続けてメモリを圧迫しないようにするため)
+    existing = pending_mention_followups.get(key, [])
+    alive = [e for e in existing if datetime.fromisoformat(e["expires_at"]) > now]
+
+    alive.append(
+        {
+            "channel_id": channel_id,
+            "original_text": original_text,
+            "bot_reply": bot_reply,
+            "expires_at": expires_at.isoformat(),
+            # "reminder": リマインド送信後の2ターン目。"chat": 通常のメンション会話の2ターン目。
+            "kind": kind,
+        }
+    )
+    pending_mention_followups[key] = alive
 
 
 def _pop_valid_mention_followup(user_id: int, channel_id: int) -> dict | None:
     """話しかけた本人・同じチャンネル・期限内であれば、待機中の2ターン目状態を取り出して消費する。
+    1人が複数件(例: 複数のリマインド)を同時に抱えている場合は、
+    そのチャンネルで一番直近に登録されたものを採用する。
     条件に合わなければNone(呼び出し元は通常のメッセージ処理を続ける = 他ユーザーの発言は無視される)。
     """
     key = str(user_id)
-    pending = pending_mention_followups.get(key)
-    if pending is None:
+    entries = pending_mention_followups.get(key)
+    if not entries:
         return None
-    if pending["channel_id"] != channel_id:
+
+    now = datetime.now(JST)
+    alive = [e for e in entries if datetime.fromisoformat(e["expires_at"]) > now]
+    candidates = [e for e in alive if e["channel_id"] == channel_id]
+
+    if not candidates:
+        # 期限切れの掃除だけ反映して終了(対象チャンネルの待機分は無い)
+        if alive:
+            pending_mention_followups[key] = alive
+        else:
+            pending_mention_followups.pop(key, None)
         return None
-    if datetime.fromisoformat(pending["expires_at"]) <= datetime.now(JST):
+
+    # 登録順(=発生順)で一番新しいものを直近の話題として採用する
+    target = candidates[-1]
+    alive.remove(target)
+    if alive:
+        pending_mention_followups[key] = alive
+    else:
         pending_mention_followups.pop(key, None)
-        return None
-    pending_mention_followups.pop(key, None)
-    return pending
+    return target
 
 
 def _looks_like_bot_command(content: str, now: datetime) -> bool:
@@ -685,12 +768,18 @@ async def on_message(message: discord.Message):
     if not _looks_like_bot_command(message.content, datetime.now(JST)):
         followup = _pop_valid_mention_followup(message.author.id, message.channel.id)
         if followup is not None:
-            reply = await _mention_followup_reply(
-                message.author.id,
-                followup["original_text"],
-                followup["bot_reply"],
-                message.content,
-            )
+            if followup.get("kind") == "reminder" and _is_recall_query(message.content):
+                # 「なんのこと？」等 -> リマインドの元の内容を高い原型率で教える
+                reply = await _reminder_recall_reply(
+                    message.author.id, followup["original_text"]
+                )
+            else:
+                reply = await _mention_followup_reply(
+                    message.author.id,
+                    followup["original_text"],
+                    followup["bot_reply"],
+                    message.content,
+                )
             await message.channel.send(reply)
             return
 
@@ -1234,7 +1323,9 @@ async def reminder_loop():
             await channel.send(f"<@{r['user_id']}> {phrased}")
             # リマインドへの反応にも一言返せるよう、メンション会話と同じ仕組みに登録しておく
             # (元の予定内容 = 1回目の発言、送ったリマインド文 = Botの返答、として扱う)
-            _register_mention_followup(r["user_id"], channel.id, r["message"], phrased)
+            _register_mention_followup(
+                r["user_id"], channel.id, r["message"], phrased, kind="reminder"
+            )
         except Exception:
             log.exception("リマインド送信に失敗しました: %s", r)
 
