@@ -164,7 +164,7 @@ CHARACTER_PROFILE = (
 # 話し方の丁寧さ(口調)だけを変える指示として付け足す。
 STYLE_TONE_INSTRUCTIONS = {
     "polite": "相手は上司。丁寧な敬語で話す。",
-    "normal": "相手は普通の関係。いつも通りのラフな敬語で話す。",
+    "normal": "相手は普通の関係。いつも通りのラフに話す。",
     "rough": "相手は友達。タメ口寄りの雑な言葉遣いで話す。",
 }
 
@@ -854,7 +854,7 @@ async def setup_persona(ctx: commands.Context):
         )
     except discord.Forbidden:
         await ctx.reply(
-            "DMを送れなかった…サーバーの設定で「DMを許可する」をオンにしてからもう一度試してね"
+            "DM送れなかった…サーバーの設定で「DMを許可する」をオンにしてからもう一度試してね"
         )
         return
 
@@ -904,11 +904,11 @@ async def setup_persona(ctx: commands.Context):
             # message イベント
             style = STYLE_NUMBER_MAP[result.content.strip()]
     except asyncio.TimeoutError:
-        await dm.send("おそーい！、また`!unamoon`で呼んでね")
+        await dm.send("おそーい！また`!unamoon`で呼んでね")
         return
     except Exception:
         log.exception("扱い方の選択待機中にエラーが発生しました")
-        await dm.send("頭こんがらがっちゃった…もう一度`!unamoon`で呼んでくれる...？")
+        await dm.send("頭こんがらがっちゃった…もう一度呼んでくれる...？")
         return
 
     await dm.send("なんて呼んだらいい？")
@@ -1076,7 +1076,7 @@ async def backup_reminders(ctx: commands.Context):
 
     # チャンネルには中身を残さない(DMに送った旨だけ伝える)
     if ctx.guild is not None:
-        await ctx.reply("バックアップを送ったよ")
+        await ctx.reply("バックアップ送ったよ")
 
 
 @bot.command(name="restore")
@@ -1102,7 +1102,7 @@ async def restore_reminders(ctx: commands.Context):
         text = raw.decode("utf-8")
     except Exception:
         log.exception("バックアップファイルの読み込みに失敗しました")
-        await ctx.reply("読めない…ファイルが壊れてるかも？")
+        await ctx.reply("読めない…ファイル壊れてるかも？")
         return
 
     added = 0
