@@ -159,6 +159,7 @@ CHARACTER_PROFILE = (
     "話しかけられた内容にまず自然に答えることを最優先し、"
     "出身地や好物などの設定は、聞かれた時や話の流れに自然に合う時だけ使う。関係ない話題に無理に絡めない。"
     "酔っ払いに話しかけれれるようなダル絡みと思ったら冷たくあしらうこと。"
+    "あしらうときはアルバイトとしてではなく一人の女の子としてあしらうこと。"
 )
 
 # 「扱い方」設定(polite/normal/rough)は、上のキャラクター設定自体は変えず、
@@ -484,15 +485,25 @@ async def _mention_called_reply(user_id: int) -> str:
     return "よんだ？"
 
 
-async def _mention_content_reply(user_id: int, content: str) -> str:
-    """メンション+内容(1ターン目)への返答を1文生成する"""
+async def _mention_content_reply(
+    user_id: int, content: str, context_text: str | None = None
+) -> str:
+    """メンション+内容(1ターン目)への返答を1文生成する。
+    context_textが渡された場合は、直近の会話の流れも踏まえて反応する
+    (「どう思う？」等、話の流れが無いと答えられない一言用)。
+    """
     system_prompt = (
         _persona_prompt(_user_style(user_id))
         + "話しかけられた内容に対して、一言だけ反応してください。"
         + "具体的な手順や長い説明は書かず、素っ気なくても親身でも構わないので気の利いた一文で返してください。"
         + "1文だけ、句読点なし、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
     )
-    reply = await _call_gemini(system_prompt, content)
+    if context_text:
+        system_prompt += "直近の会話の流れを踏まえた上で、話しかけられた内容に反応してください。"
+        user_content = f"直近の会話:\n{context_text}\n\n話しかけられた内容: {content}"
+    else:
+        user_content = content
+    reply = await _call_gemini(system_prompt, user_content)
     return reply or MENTION_CONTENT_FALLBACK
 
 
@@ -559,6 +570,24 @@ def _looks_like_bot_command(content: str, now: datetime) -> bool:
     return False
 
 
+# 「どう思う？」等、直近の会話の流れが無いと答えられない一言。
+# これに完全一致した時だけ、直近の会話を読み込んでからGeminiに渡す(通常のメンションは今まで通り軽いまま)。
+MENTION_CONTEXT_TRIGGER_PHRASES = {"どう思う？", "ヤバくない？"}
+MENTION_CONTEXT_READ_LIMIT = 10
+
+
+async def _fetch_recent_context(
+    message: discord.Message, limit: int = MENTION_CONTEXT_READ_LIMIT
+) -> str:
+    """話しかけられたメッセージより前の直近limit件を、古い→新しい順のテキストにして返す。"""
+    lines = []
+    async for msg in message.channel.history(limit=limit, before=message):
+        if msg.content:
+            lines.append(f"{msg.author.display_name}: {msg.content}")
+    lines.reverse()
+    return "\n".join(lines)
+
+
 async def handle_mention_chat(message: discord.Message, content: str) -> None:
     """メンション時の会話処理をまとめて振り分ける(呼ばれただけ/内容あり)。"""
     in_chat_channel = CHAT_CHANNEL_ID is None or message.channel.id == CHAT_CHANNEL_ID
@@ -582,7 +611,10 @@ async def handle_mention_chat(message: discord.Message, content: str) -> None:
         return
 
     # メンション+内容(1ターン目): 話しかけ内容に反応し、本人からの2ターン目を待つ
-    reply = await _mention_content_reply(message.author.id, content)
+    context_text = None
+    if content.strip() in MENTION_CONTEXT_TRIGGER_PHRASES:
+        context_text = await _fetch_recent_context(message)
+    reply = await _mention_content_reply(message.author.id, content, context_text)
     await message.channel.send(reply)
     _register_mention_followup(message.author.id, message.channel.id, content, reply)
 
