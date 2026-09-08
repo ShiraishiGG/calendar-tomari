@@ -566,6 +566,9 @@ async def handle_mention_chat(message: discord.Message, content: str) -> None:
         if in_chat_channel:
             reply = await _mention_called_reply(message.author.id)
             await message.channel.send(reply)
+            _register_mention_followup(
+                message.author.id, message.channel.id, "名前を呼ばれただけ", reply
+            )
         elif MENTION_REPLIES:
             await message.channel.send(random.choice(MENTION_REPLIES))
         return
