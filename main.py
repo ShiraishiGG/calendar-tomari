@@ -144,27 +144,37 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GEMINI_TIMEOUT_SECONDS = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "5"))
 
-# 「扱い方」設定(polite/normal/rough)ごとのペルソナ部分。
-# normalは従来のプロンプトと同じ(未設定ユーザーもこれが使われる)。
-STYLE_SYSTEM_PROMPTS = {
-    "polite": (
-        "あなたは上司と話す女の子のDiscordの通知Botです。"
-        "ユーザーが登録した予定を、上司が忘れていないか確かめる一言に言い換えてください。"
-    ),
-    "normal": (
-        "あなたはラフな敬語を使う女の子のDiscordの通知Botです。"
-        "ユーザーが登録した予定を、忘れていないか確かめる一言に言い換えてください。"
-    ),
-    "rough": (
-        "あなたは友達と話す女の子のDiscordの通知Botです。"
-        "ユーザーが登録した予定を、友達が忘れていないか確認する一言に雑に言い換えてください。"
-    ),
+# ----------------------------------------------------------------------
+# キャラクター設定 (全Gemini呼び出しで共通の土台)
+# ----------------------------------------------------------------------
+# API自体はステートレス(呼び出しごとに独立)なので、キャラクターを固定するには
+# 毎回この設定を含めて送るしかない。ブレを無くしつつクレジット消費を増やしすぎない
+# よう、名前・人柄・応答ルールを1箇所に集約した簡潔な文章にまとめている。
+# ここを直せば、リマインド文言・メンション会話など全ての箇所に反映される。
+CHARACTER_PROFILE = (
+    "あなたはDiscordの女の子キャラクター「宇奈月とまり(うなづき とまり)」です。"
+    "一人称は「わたし」。ラフな敬語を話す。富山県黒部市在住で、富山の地酒(特に日本酒の「剱岳」)が好き。"
+    "出身/居住地を聞かれたら最初は「北陸」とだけ答え、"
+    "「北陸のどこ？」のようにさらに深掘りされた時だけ「富山県黒部市」と答える。"
+)
+
+# 「扱い方」設定(polite/normal/rough)は、上のキャラクター設定自体は変えず、
+# 話し方の丁寧さ(口調)だけを変える指示として付け足す。
+STYLE_TONE_INSTRUCTIONS = {
+    "polite": "相手は上司。丁寧な敬語で話す。",
+    "normal": "相手は普通の関係。いつも通りのラフな敬語で話す。",
+    "rough": "相手は友達。タメ口寄りの雑な言葉遣いで話す。",
 }
+
+
+def _persona_prompt(style: str) -> str:
+    tone = STYLE_TONE_INSTRUCTIONS.get(style, STYLE_TONE_INSTRUCTIONS["normal"])
+    return CHARACTER_PROFILE + tone
 
 
 def _build_gemini_system_prompt(style: str, nickname_to_use: str | None) -> str:
     """扱い方(style)と、今回名前を付けるかどうかでシステムプロンプトを組み立てる。"""
-    persona = STYLE_SYSTEM_PROMPTS.get(style, STYLE_SYSTEM_PROMPTS["normal"])
+    persona = _persona_prompt(style) + "ユーザーが登録した予定を、忘れていないか確認する一言に言い換えてください。"
     if nickname_to_use:
         # 名前を付ける回だけ「相手を示すワードは不要」を外し、呼び方を明示する
         return (
@@ -416,17 +426,6 @@ MENTION_FOLLOWUP_FALLBACK = "どういたしまして"
 # user_id(str) -> {"channel_id": int, "original_text": str, "bot_reply": str, "expires_at": iso str}
 pending_mention_followups: dict[str, dict] = {}
 
-MENTION_STYLE_PROMPTS = {
-    "polite": "あなたは上司と話す女の子です。",
-    "normal": "あなたはラフな敬語を使う女の子です。",
-    "rough": "あなたは友達と話す女の子です。",
-}
-
-
-def _mention_persona(style: str) -> str:
-    return MENTION_STYLE_PROMPTS.get(style, MENTION_STYLE_PROMPTS["normal"])
-
-
 def _user_style(user_id: int) -> str:
     prefs = user_prefs.get(str(user_id))
     return (prefs or {}).get("style", "normal")
@@ -469,7 +468,7 @@ async def _mention_called_reply(user_id: int) -> str:
         return random.choice(MENTION_REPLIES)
 
     system_prompt = (
-        _mention_persona(_user_style(user_id))
+        _persona_prompt(_user_style(user_id))
         + "名前を呼ばれたことに対する一言のリアクションだけを返してください。"
         + "質問への回答ではなく、呼ばれたことへの反応です。句読点なし、1文だけ、絵文字なし、20文字前後で。"
         + "前置きや説明は付けず、反応の一言だけを返してください。"
@@ -485,7 +484,7 @@ async def _mention_called_reply(user_id: int) -> str:
 async def _mention_content_reply(user_id: int, content: str) -> str:
     """メンション+内容(1ターン目)への返答を1文生成する"""
     system_prompt = (
-        _mention_persona(_user_style(user_id))
+        _persona_prompt(_user_style(user_id))
         + "話しかけられた内容に対して、一言だけ反応してください。"
         + "具体的な手順や長い説明は書かず、素っ気なくても親身でも構わないので気の利いた一文で返してください。"
         + "1文だけ、句読点なし、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
@@ -499,7 +498,7 @@ async def _mention_followup_reply(
 ) -> str:
     """2ターン目(相槌)を1文生成する"""
     system_prompt = (
-        _mention_persona(_user_style(user_id))
+        _persona_prompt(_user_style(user_id))
         + "直前の会話の流れを踏まえて、一言を考えてください。"
         + "1文だけ、句読点なし、絵文字なし、これ以降のやり取りはありません、前置きや説明は付けず一言だけを返してください。"
     )
