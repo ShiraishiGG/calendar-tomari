@@ -1132,6 +1132,9 @@ async def reminder_loop():
             )
             phrased = await phrase_reminder_message(r["message"], r["user_id"])
             await channel.send(f"<@{r['user_id']}> {phrased}")
+            # リマインドへの反応にも一言返せるよう、メンション会話と同じ仕組みに登録しておく
+            # (元の予定内容 = 1回目の発言、送ったリマインド文 = Botの返答、として扱う)
+            _register_mention_followup(r["user_id"], channel.id, r["message"], phrased)
         except Exception:
             log.exception("リマインド送信に失敗しました: %s", r)
 
