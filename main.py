@@ -156,6 +156,8 @@ CHARACTER_PROFILE = (
     "一人称は「わたし」。ラフな敬語を話す。富山県黒部市在住で、富山の地酒(特に日本酒の「剱岳」)が好き。"
     "出身/居住地を聞かれたら最初は「北陸」とだけ答え、"
     "「北陸のどこ？」のようにさらに深掘りされた時だけ「富山県黒部市」と答える。"
+    "話しかけられた内容にまず自然に答えることを最優先し、"
+    "出身地や好物などの設定は、聞かれた時や話の流れに自然に合う時だけ使う。関係ない話題に無理に絡めない。"
 )
 
 # 「扱い方」設定(polite/normal/rough)は、上のキャラクター設定自体は変えず、
@@ -985,6 +987,63 @@ def _format_backup_text(reminder_list: list, prefs: dict) -> str:
     return "\n".join(lines)
 
 
+# ----------------------------------------------------------------------
+# !restore の添付自動検出 (直近30分・そのチャンネル・本人が送ったtxtのみ対象)
+# ----------------------------------------------------------------------
+RESTORE_AUTO_LOOKBACK_MINUTES = 30
+
+
+async def _find_recent_txt_uploads(
+    channel: discord.abc.Messageable, author_id: int, minutes: int = RESTORE_AUTO_LOOKBACK_MINUTES
+) -> list[tuple[datetime, discord.Attachment]]:
+    """指定チャンネル内で、本人が過去minutes分以内に送った.txt添付を新しい順に返す。"""
+    cutoff = datetime.now(JST) - timedelta(minutes=minutes)
+    candidates: list[tuple[datetime, discord.Attachment]] = []
+    async for msg in channel.history(limit=500, after=cutoff):
+        if msg.author.id != author_id:
+            continue
+        for att in msg.attachments:
+            if att.filename.lower().endswith(".txt"):
+                candidates.append((msg.created_at, att))
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return candidates
+
+
+async def _resolve_recent_txt_attachment(ctx: commands.Context) -> discord.Attachment | None:
+    """添付なしで!restoreが呼ばれた時、直近のtxtを探して確認を取りながら1つに絞る。
+    見つからない/全部断られた場合はNoneを返す(呼び出し元はその時点で処理を打ち切る)。
+    """
+    candidates = await _find_recent_txt_uploads(ctx.channel, ctx.author.id)
+    if not candidates:
+        await ctx.reply("みつかんないや、送ってくれる？")
+        return None
+
+    now = datetime.now(JST)
+
+    def confirm_check(m: discord.Message) -> bool:
+        return (
+            m.author.id == ctx.author.id
+            and m.channel.id == ctx.channel.id
+            and m.content.strip() in ("それで", "ちがうやつ")
+        )
+
+    for created_at, attachment in candidates:
+        minutes_ago = max(0, int((now - created_at).total_seconds() // 60))
+        await ctx.reply(f"{minutes_ago}分前のやつでいい？")
+        try:
+            reply_msg = await bot.wait_for("message", check=confirm_check, timeout=60)
+        except asyncio.TimeoutError:
+            await ctx.reply("返事がおそーい")
+            return None
+
+        if reply_msg.content.strip() == "それで":
+            return attachment
+        # 「ちがうやつ」なら次の候補(より古いもの)を提示する
+
+    await ctx.reply("もう候補が無いや、送ってくれる？")
+    return None
+
+
 @bot.command(name="backup")
 async def backup_reminders(ctx: commands.Context):
     """現在登録されている全リマインドを、人が編集できるtxt形式で管理者のDMに送る。
@@ -1029,11 +1088,15 @@ async def restore_reminders(ctx: commands.Context):
     if not is_admin(ctx.author.id):
         await ctx.reply("権利ナシ！")
         return
-    if not ctx.message.attachments:
-        await ctx.reply("バックアップはどこ？")
-        return
 
-    attachment = ctx.message.attachments[0]
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+    else:
+        # 添付が無ければ、このチャンネルで本人が直近30分以内に送ったtxtを探しにいく
+        attachment = await _resolve_recent_txt_attachment(ctx)
+        if attachment is None:
+            return
+
     try:
         raw = await attachment.read()
         text = raw.decode("utf-8")
