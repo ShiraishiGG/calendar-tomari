@@ -41,7 +41,7 @@ log = logging.getLogger("web-push")
 # base64文字列のペアをそのまま環境変数に入れる想定。
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
-VAPID_CLAIMS_SUB = os.environ.get("VAPID_CLAIMS_SUB", "mailto:example@example.com")
+VAPID_CLAIMS_SUB = os.environ.get("VAPID_CLAIMS_SUB") or "mailto:example@example.com"
 
 SUBSCRIPTIONS_FILE = os.environ.get("PUSH_SUBSCRIPTIONS_FILE", "push_subscriptions.json")
 
@@ -211,10 +211,8 @@ SERVICE_WORKER_JS = """
 self.addEventListener('push', function (event) {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) {}
-  const title = data.title || '宇奈月とまりから';
-  const body = data.body || '';
-  event.waitUntil(self.registration.showNotification(title, {
-    body: body,
+  const message = data.message || '';
+  event.waitUntil(self.registration.showNotification(message, {
     icon: '/push/icon.png',
     badge: '/push/icon.png',
   }));
@@ -288,6 +286,59 @@ async def handle_icon(request: web.Request) -> web.Response:
     return web.FileResponse(ICON_PATH)
 
 
+def diagnose_and_send_test(user_id: int) -> str:
+    """!pushtest から呼ばれる。原因の切り分けができるよう、結果を文字列で返す
+    (購読が無いのか、送信自体が失敗しているのかをDiscordの返信だけで分かるようにする)。
+    """
+    if not is_configured():
+        return "VAPID鍵が未設定だよ(管理者に確認してね)"
+
+    key = str(user_id)
+    subs = _subscriptions.get(key)
+    if not subs:
+        return "購読が見つからないよ。まだ!pushで登録できていないみたい"
+
+    payload = json.dumps({"message": "テスト通知だよ"})
+    results = []
+    alive = []
+    for i, sub in enumerate(subs, start=1):
+        try:
+            webpush(
+                subscription_info=sub,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_CLAIMS_SUB},
+            )
+            results.append(f"端末{i}: 送信成功(プッシュサービスには届いた)")
+            alive.append(sub)
+        except WebPushException as e:
+            status = getattr(e.response, "status_code", None)
+            body_text = ""
+            try:
+                body_text = e.response.text if e.response is not None else ""
+            except Exception:
+                pass
+            if status in (404, 410):
+                results.append(f"端末{i}: 購読が無効(status={status})なので削除するね")
+                continue
+            results.append(f"端末{i}: 失敗 status={status} {body_text}"[:300])
+            alive.append(sub)
+        except Exception as e:
+            results.append(f"端末{i}: 予期しないエラー: {e!r}"[:300])
+            alive.append(sub)
+
+    if len(alive) != len(subs):
+        _subscriptions[key] = alive
+        save_subscriptions(_subscriptions)
+
+    return "\n".join(results)
+
+
+async def diagnose_and_send_test_async(user_id: int) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, diagnose_and_send_test, user_id)
+
+
 def register_routes(app: web.Application) -> None:
     """main.py の start_web_server() から1回呼ぶだけでよい。"""
     app.router.add_get("/push/", handle_subscribe_page)
@@ -303,10 +354,14 @@ def register_routes(app: web.Application) -> None:
 # ----------------------------------------------------------------------
 
 
-def send_reminder_push(user_id: int, body: str, title: str = "宇奈月とまりから") -> None:
+def send_reminder_push(user_id: int, message: str) -> None:
     """該当ユーザーの全購読先にプッシュ通知を送る(ベストエフォート)。
     無効になった購読(410/404)は自動で削除し、それ以外のエラーは握りつぶしてログだけ残す
     (Discord側の通知が失敗しないことを最優先するため)。
+
+    リマインドの一言(message)をそのまま通知のタイトルとして表示する。
+    アプリ名(宇奈月とまり)自体はOS側が通知の送信元として別途表示してくれるため、
+    「宇奈月とまりから」のような前置きはここでは付けない。
     """
     if not is_configured():
         return
@@ -315,7 +370,7 @@ def send_reminder_push(user_id: int, body: str, title: str = "宇奈月とまり
     if not subs:
         return
 
-    payload = json.dumps({"title": title, "body": body})
+    payload = json.dumps({"message": message})
     alive = []
     for sub in subs:
         try:
@@ -342,9 +397,9 @@ def send_reminder_push(user_id: int, body: str, title: str = "宇奈月とまり
         save_subscriptions(_subscriptions)
 
 
-async def send_reminder_push_async(user_id: int, body: str, title: str = "宇奈月とまりから") -> None:
+async def send_reminder_push_async(user_id: int, message: str) -> None:
     """reminder_loop など非同期側から呼ぶための薄いラッパー。"""
     if not is_configured():
         return
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, send_reminder_push, user_id, body, title)
+    await loop.run_in_executor(None, send_reminder_push, user_id, message)
