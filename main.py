@@ -652,6 +652,67 @@ def _pop_valid_mention_followup(user_id: int, channel_id: int) -> dict | None:
     return target
 
 
+# ----------------------------------------------------------------------
+# 挨拶メッセージへの返信 (メンション不要で「おはよう」等に反応する)
+# ----------------------------------------------------------------------
+# GREETING_CHANNEL_ID で指定したチャンネル、またはDM(相手を問わず)でのみ有効。
+# どちらでもない場合はこの機能は反応せず、従来動作(要メンション/登録チャンネル)のまま。
+
+GREETING_CHANNEL_ID = os.environ.get("GREETING_CHANNEL_ID")
+GREETING_CHANNEL_ID = int(GREETING_CHANNEL_ID) if GREETING_CHANNEL_ID else None
+
+# 前方一致で判定するキーワード(カンマ区切りで複数指定可能)。
+# 「おはようございます」のように後ろに続きがあっても反応できるよう前方一致にしている。
+GREETING_KEYWORDS = [
+    kw.strip()
+    for kw in os.environ.get(
+        "GREETING_KEYWORDS",
+        "おはよ,おやす,おやんみ,こんにち,こんばんは,ただいま,いってきます,いってらっしゃい,"
+        "やっほー,おつかれ,お疲れ,こんうなうな,よろしく",
+    ).split(",")
+    if kw.strip()
+]
+
+# Gemini未設定/生成失敗時に使う固定の返事(マッチしたキーワードごと)。
+GREETING_FALLBACK_REPLIES = {
+    "おはよう": "おはよー",
+    "おやすみ": "おやすみー",
+    "こんにちは": "こんにちはー",
+    "こんばんは": "こんばんはー",
+    "ただいま": "おかえりー",
+    "いってきます": "いってらっしゃーい",
+    "やっほー": "やっほー",
+    "おつかれ": "おつかれさま",
+    "お疲れ": "おつかれさま",
+    "こんうなうな": "こんうなうなー",
+    "よろしく": "よろしくね",
+}
+
+
+def _match_greeting(content: str) -> str | None:
+    """メッセージが挨拶かどうかを判定し、マッチしたキーワード(前方一致)を返す。"""
+    stripped = content.strip().strip("！!。.、,　 ")
+    if not stripped:
+        return None
+    for kw in GREETING_KEYWORDS:
+        if stripped.startswith(kw):
+            return kw
+    return None
+
+
+async def _greeting_reply(user_id: int, greeting_text: str, matched_keyword: str) -> str:
+    """挨拶に対する一言を生成する。Gemini未設定/失敗時は固定文言にフォールバックする。"""
+    system_prompt = (
+        _persona_prompt(_user_style(user_id))
+        + "話しかけられた挨拶に対して、説明や質問を加えず、挨拶をそのまま自然に返してください。"
+        + "1文だけ、絵文字なし、前置きは付けず挨拶の返事だけを返してください。"
+    )
+    reply = await _call_gemini(system_prompt, greeting_text)
+    if reply:
+        return reply
+    return GREETING_FALLBACK_REPLIES.get(matched_keyword, f"{matched_keyword}！")
+
+
 def _looks_like_bot_command(content: str, now: datetime) -> bool:
     """予定登録/キャンセル/一覧表示など、既存コマンドっぽいメッセージかどうか。
     2ターン目待ちのユーザーがこれらを送った場合は、相槌より本来の処理を優先させるためのガード。
@@ -794,6 +855,28 @@ async def on_message(message: discord.Message):
                     message.content,
                 )
             await message.channel.send(reply)
+            return
+
+    # 挨拶メッセージへの返信(GREETING_CHANNEL_IDのチャンネル or DM。メンション不要)。
+    # 登録チャンネル制限(REGISTER_CHANNEL_ID)やメンション要否より先に判定する。
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    is_greeting_channel = is_dm or (
+        GREETING_CHANNEL_ID is not None and message.channel.id == GREETING_CHANNEL_ID
+    )
+    if is_greeting_channel:
+        matched_greeting = _match_greeting(message.content)
+        if matched_greeting:
+            greeting_text = message.content.strip()
+            reply = await _greeting_reply(
+                message.author.id, greeting_text, matched_greeting
+            )
+            await message.channel.send(reply)
+            # 挨拶に対して返事した後、本人からの追加メッセージが来たら
+            # メンション会話の「2ターン目」と同じ仕組みで続きを返せるようにしておく
+            # (再メンション不要・同じチャンネル・タイムアウト以内のみ有効)。
+            _register_mention_followup(
+                message.author.id, message.channel.id, greeting_text, reply, kind="chat"
+            )
             return
 
     # 判定チャンネル: REGISTER_CHANNEL_ID未設定ならどこでも、設定していればそのチャンネルのみ
