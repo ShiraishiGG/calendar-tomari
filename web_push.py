@@ -134,7 +134,13 @@ SUBSCRIBE_PAGE_HTML = """<!doctype html>
   <button id="subscribe-btn">通知を許可する</button>
   <p class="status" id="status"></p>
 <script>
-const TOKEN = __TOKEN_JSON__;
+// iOSはホーム画面のアイコンから開くとmanifestのstart_url(token無し)で起動することがあるため、
+// URLにtokenがあれば保存しておき、無ければ保存済みのものを使う。
+const urlToken = new URLSearchParams(location.search).get("token");
+if (urlToken) {
+  localStorage.setItem("push_token", urlToken);
+}
+const TOKEN = urlToken || localStorage.getItem("push_token") || "";
 
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - base64String.length % 4) % 4);
@@ -145,6 +151,10 @@ function urlBase64ToUint8Array(base64String) {
 
 async function subscribe() {
   const statusEl = document.getElementById("status");
+  if (!TOKEN) {
+    statusEl.textContent = "リンクの情報が見つからないよ、Discordでもう一度「!push」を実行してリンクを開き直してね";
+    return;
+  }
   try {
     if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
       statusEl.textContent = "このブラウザ/開き方だと通知に対応していないみたい。"
@@ -211,9 +221,9 @@ MANIFEST = {
 
 
 async def handle_subscribe_page(request: web.Request) -> web.Response:
-    token = request.query.get("token", "")
-    html = SUBSCRIBE_PAGE_HTML.replace("__TOKEN_JSON__", json.dumps(token))
-    return web.Response(text=html, content_type="text/html")
+    # tokenはクライアント側のJS(URLパラメータ or localStorage)で解決するので、
+    # サーバー側では常に同じ静的HTMLを返すだけでよい。
+    return web.Response(text=SUBSCRIBE_PAGE_HTML, content_type="text/html")
 
 
 async def handle_manifest(request: web.Request) -> web.Response:
