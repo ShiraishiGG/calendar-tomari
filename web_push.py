@@ -153,6 +153,14 @@ function urlBase64ToUint8Array(base64String) {
   return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
 }
 
+// サービスワーカーの登録はページ読み込み時に済ませておく。
+// クリック直後〜通知許可のダイアログまでの間に待ち時間(await)を挟むと、
+// Safariでは「ユーザー操作の直後」と見なされずダイアログが出ない/自動拒否になることがあるため。
+let swRegistrationPromise = null;
+if ("serviceWorker" in navigator) {
+  swRegistrationPromise = navigator.serviceWorker.register("/push/sw.js");
+}
+
 async function subscribe() {
   const statusEl = document.getElementById("status");
   const code = document.getElementById("code-input").value.trim();
@@ -160,13 +168,20 @@ async function subscribe() {
     statusEl.textContent = "6桁の数字コードを入力してね";
     return;
   }
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    statusEl.textContent = "このブラウザ/開き方だと通知に対応していないみたい。"
+      + "iPhoneならホーム画面に追加したアイコンから開いてみてね";
+    return;
+  }
   try {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      statusEl.textContent = "このブラウザ/開き方だと通知に対応していないみたい。"
-        + "iPhoneならホーム画面に追加したアイコンから開いてみてね";
+    // 他の処理より先に、クリックした直後に通知許可を求める
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      statusEl.textContent = "通知が許可されなかったよ。"
+        + "設定アプリの「通知」→「とまり」から許可をONにしてもう一度試してね";
       return;
     }
-    const reg = await navigator.serviceWorker.register("/push/sw.js");
+    const reg = await (swRegistrationPromise || navigator.serviceWorker.register("/push/sw.js"));
     const keyRes = await fetch("/push/vapid-public-key");
     if (!keyRes.ok) throw new Error("鍵の取得に失敗");
     const { key } = await keyRes.json();
