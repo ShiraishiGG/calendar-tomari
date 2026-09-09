@@ -1061,8 +1061,8 @@ async def cancel_reminder(ctx: commands.Context, reminder_id: int):
 
 @bot.command(name="push")
 async def setup_push(ctx: commands.Context):
-    """スマホのブラウザ通知(Web Push)を購読するための、本人専用リンクをDMで送る。
-    Discord/LINEなどアプリの通知をOFFにしていても、このリンクを購読しておけば
+    """スマホのブラウザ通知(Web Push)を購読するための、開くリンクと本人専用の6桁コードをDMで送る。
+    Discord/LINEなどアプリの通知をOFFにしていても、これで購読しておけば
     リマインド送信時に別チャンネルとして通知が届くようになる。
     """
     if not web_push.is_configured():
@@ -1072,15 +1072,17 @@ async def setup_push(ctx: commands.Context):
         await ctx.reply("URLの設定が済んでないみたい、管理者に確認してね")
         return
 
-    token = web_push.create_subscribe_token(ctx.author.id)
-    link = f"{PUBLIC_BASE_URL}/push/?token={token}"
+    code = web_push.create_subscribe_token(ctx.author.id)
+    link = f"{PUBLIC_BASE_URL}/push/"
 
     try:
         await ctx.author.send(
-            "このリンクをスマホで開いて「通知を許可する」を押してね(15分だけ有効だよ)\n"
-            f"{link}\n\n"
-            "iPhoneの場合は、まずSafariで開いて共有ボタン→「ホーム画面に追加」→"
-            "ホーム画面のアイコンから開き直してから押してね"
+            "①このリンクを開いてね\n"
+            f"{link}\n"
+            "(iPhoneの場合は、Safariで開いて共有ボタン→「ホーム画面に追加」→"
+            "ホーム画面のアイコンから開き直してね)\n\n"
+            f"②開いたページにこのコードを入力して「登録する」を押してね(15分だけ有効だよ)\n"
+            f"コード: {code}"
         )
     except discord.Forbidden:
         await ctx.reply(
