@@ -584,7 +584,7 @@ async def _reminder_recall_reply(user_id: int, original_text: str) -> str:
         + "元の予定の言葉(単語)はできるだけ変えずにそのまま使い、意訳や要約はしないでください。"
         + "ただし「〜のことだよ」を毎回機械的に付けるのではなく、"
         + "キャラクターらしい自然な語尾や言い回しで返してください。"
-        + "1文だけ、絵文字なし、前置きや説明は付けず答えの一言だけを返してください。"
+        + "1文だけ、句点なし、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
     )
     reply = await _call_gemini(system_prompt, f"元の予定の文言: {original_text}")
     return reply or f"{original_text}のことだよ"
@@ -705,7 +705,7 @@ async def _greeting_reply(user_id: int, greeting_text: str, matched_keyword: str
     system_prompt = (
         _persona_prompt(_user_style(user_id))
         + "話しかけられた挨拶に対して、説明や質問を加えず、挨拶をそのまま自然に返してください。"
-        + "1文だけ、絵文字なし、前置きは付けず挨拶の返事だけを返してください。"
+        + "1文だけ、句点なし、絵文字なし、前置きや説明は付けず反応の一言だけを返してください。"
     )
     reply = await _call_gemini(system_prompt, greeting_text)
     if reply:
