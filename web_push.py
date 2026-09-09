@@ -116,7 +116,7 @@ SUBSCRIBE_PAGE_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>とまりの通知</title>
-<link rel="manifest" href="/push/manifest.webmanifest">
+<link rel="manifest" id="manifest-link" href="/push/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/push/icon.png">
 <link rel="icon" href="/push/icon.png">
 <style>
@@ -135,11 +135,14 @@ SUBSCRIBE_PAGE_HTML = """<!doctype html>
   <p class="status" id="status"></p>
   <p class="status" id="debug"></p>
 <script>
-// iOSはホーム画面のアイコンから開くとmanifestのstart_url(token無し)で起動することがあるため、
-// URLにtokenがあれば保存しておき、無ければ保存済みのものを使う。
+// iOSは「ホーム画面に追加」した瞬間、manifestのstart_urlをそのまま
+// アイコンの起動先として焼き込む。localStorageはSafariと共有されない場合があるため、
+// manifest自体をtoken付きで動的に生成させ、start_urlにtokenを埋め込ませることで対応する。
 const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) {
   localStorage.setItem("push_token", urlToken);
+  const manifestLink = document.getElementById("manifest-link");
+  manifestLink.href = "/push/manifest.webmanifest?token=" + encodeURIComponent(urlToken);
 }
 const TOKEN = urlToken || localStorage.getItem("push_token") || "";
 
@@ -212,18 +215,20 @@ self.addEventListener('notificationclick', function (event) {
 });
 """
 
-MANIFEST = {
-    "name": "宇奈月とまり",
-    "short_name": "とまり",
-    "start_url": "/push/",
-    "display": "standalone",
-    "background_color": "#ffffff",
-    "theme_color": "#5865F2",
-    "icons": [
-        {"src": "/push/icon.png", "sizes": "192x192", "type": "image/png"},
-        {"src": "/push/icon.png", "sizes": "512x512", "type": "image/png"},
-    ],
-}
+def _build_manifest(token: str) -> dict:
+    start_url = f"/push/?token={token}" if token else "/push/"
+    return {
+        "name": "宇奈月とまり",
+        "short_name": "とまり",
+        "start_url": start_url,
+        "display": "standalone",
+        "background_color": "#ffffff",
+        "theme_color": "#5865F2",
+        "icons": [
+            {"src": "/push/icon.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/push/icon.png", "sizes": "512x512", "type": "image/png"},
+        ],
+    }
 
 
 async def handle_subscribe_page(request: web.Request) -> web.Response:
@@ -233,7 +238,9 @@ async def handle_subscribe_page(request: web.Request) -> web.Response:
 
 
 async def handle_manifest(request: web.Request) -> web.Response:
-    return web.json_response(MANIFEST, content_type="application/manifest+json")
+    token = request.query.get("token", "")
+    manifest = _build_manifest(token)
+    return web.json_response(manifest, content_type="application/manifest+json")
 
 
 async def handle_service_worker(request: web.Request) -> web.Response:
