@@ -133,6 +133,7 @@ SUBSCRIBE_PAGE_HTML = """<!doctype html>
      ホーム画面のアイコンから開き直してから押してね)</p>
   <button id="subscribe-btn">通知を許可する</button>
   <p class="status" id="status"></p>
+  <p class="status" id="debug"></p>
 <script>
 // iOSはホーム画面のアイコンから開くとmanifestのstart_url(token無し)で起動することがあるため、
 // URLにtokenがあれば保存しておき、無ければ保存済みのものを使う。
@@ -141,6 +142,11 @@ if (urlToken) {
   localStorage.setItem("push_token", urlToken);
 }
 const TOKEN = urlToken || localStorage.getItem("push_token") || "";
+
+// tokenを検出できているか、ボタンを押す前にその場で分かるようにしておく
+document.getElementById("debug").textContent = TOKEN
+  ? "リンク情報: 検出できてるよ"
+  : "リンク情報: 検出できてない(アドレスバーに ?token=... が付いてるか確認してね)";
 
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - base64String.length % 4) % 4);
