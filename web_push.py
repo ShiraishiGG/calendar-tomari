@@ -6,16 +6,21 @@ Discord/LINEなどアプリ単位で通知をOFFにしていても、スマホ�
 プッシュ通知を届けられる(iOSはホーム画面に追加したPWAとして開く必要あり)。
 
 ユーザー側の流れ:
-  1. Discordで `!push` を実行 -> DMに購読用リンクが届く(15分だけ有効)
-  2. スマホでそのリンクを開く
-     - iPhone: 一度Safariで開いて「共有」→「ホーム画面に追加」→
-               ホーム画面のアイコンから開き直してから「通知を許可する」をタップ
-     - Android: そのままブラウザで開いて「通知を許可する」をタップ
-  3. 以後、そのユーザー宛のリマインドはこのモジュール経由でもプッシュ通知が届く
+  1. Discordで `!push` を実行 -> DMに「開くリンク」と「6桁コード」が届く(コードは15分だけ有効)
+  2. スマホでリンクを開く(初回だけ)
+     - iPhone: Safariで開く→共有→「ホーム画面に追加」→ホーム画面のアイコンから開き直す
+     - Android: そのままブラウザで開く
+  3. 開いたページで6桁コードを入力して「登録する」を押す
+  4. 以後、そのユーザー宛のリマインドはこのモジュール経由でもプッシュ通知が届く
+
+  ※ URLのクエリパラメータやlocalStorageには一切頼っていない
+    (iOSでは「ホーム画面に追加」した瞬間、manifestのstart_urlが優先されて
+     URLの情報もlocalStorageの中身も引き継がれないことがあるため、
+     手入力のコードだけで完結する方式にしている)。
 
 main.py側は以下だけ呼べばよい:
   - register_routes(app)                          : aiohttpにルートを追加
-  - create_subscribe_token(user_id)                : !push コマンドで使う
+  - create_subscribe_token(user_id)                : !push コマンドで使う(6桁コードを発行)
   - is_configured()                                : VAPID鍵が設定済みか
   - await send_reminder_push_async(user_id, body)  : リマインド送信時に呼ぶ
 """
@@ -88,12 +93,16 @@ _subscriptions: dict[str, list[dict]] = load_subscriptions()
 
 
 def create_subscribe_token(user_id: int) -> str:
-    token = secrets.token_urlsafe(24)
-    _pending_tokens[token] = {
+    """手入力しやすい6桁の数字コードを発行する(衝突したら別の番号を振り直す)。"""
+    for _ in range(10):
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        if code not in _pending_tokens:
+            break
+    _pending_tokens[code] = {
         "user_id": user_id,
         "expires_at": time.time() + TOKEN_TTL_MINUTES * 60,
     }
-    return token
+    return code
 
 
 def _resolve_token(token: str) -> int | None:
@@ -116,41 +125,27 @@ SUBSCRIBE_PAGE_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>とまりの通知</title>
-<link rel="manifest" id="manifest-link" href="/push/manifest.webmanifest">
+<link rel="manifest" href="/push/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/push/icon.png">
 <link rel="icon" href="/push/icon.png">
 <style>
   body { font-family: sans-serif; text-align: center; padding: 40px 16px; }
+  input { font-size: 20px; padding: 10px; width: 140px; text-align: center;
+          letter-spacing: 4px; border: 1px solid #ccc; border-radius: 8px; }
   button { font-size: 18px; padding: 12px 24px; border-radius: 8px; border: none;
-           background: #5865F2; color: #fff; }
+           background: #5865F2; color: #fff; display: block; margin: 16px auto 0; }
   p.status { margin-top: 20px; color: #555; white-space: pre-wrap; }
 </style>
 </head>
 <body>
   <h2>宇奈月とまりからの通知</h2>
-  <p>下のボタンで通知を許可してね。<br>
+  <p>Discordの「!push」で届いた<b>6桁のコード</b>を入力してね。<br>
      (iPhoneの場合は、まず共有ボタンから「ホーム画面に追加」して、
-     ホーム画面のアイコンから開き直してから押してね)</p>
-  <button id="subscribe-btn">通知を許可する</button>
+     ホーム画面のアイコンから開き直してから入力してね)</p>
+  <input id="code-input" inputmode="numeric" maxlength="6" placeholder="123456">
+  <button id="subscribe-btn">登録する</button>
   <p class="status" id="status"></p>
-  <p class="status" id="debug"></p>
 <script>
-// iOSは「ホーム画面に追加」した瞬間、manifestのstart_urlをそのまま
-// アイコンの起動先として焼き込む。localStorageはSafariと共有されない場合があるため、
-// manifest自体をtoken付きで動的に生成させ、start_urlにtokenを埋め込ませることで対応する。
-const urlToken = new URLSearchParams(location.search).get("token");
-if (urlToken) {
-  localStorage.setItem("push_token", urlToken);
-  const manifestLink = document.getElementById("manifest-link");
-  manifestLink.href = "/push/manifest.webmanifest?token=" + encodeURIComponent(urlToken);
-}
-const TOKEN = urlToken || localStorage.getItem("push_token") || "";
-
-// tokenを検出できているか、ボタンを押す前にその場で分かるようにしておく
-document.getElementById("debug").textContent = TOKEN
-  ? "リンク情報: 検出できてるよ"
-  : "リンク情報: 検出できてない(アドレスバーに ?token=... が付いてるか確認してね)";
-
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
@@ -160,8 +155,9 @@ function urlBase64ToUint8Array(base64String) {
 
 async function subscribe() {
   const statusEl = document.getElementById("status");
-  if (!TOKEN) {
-    statusEl.textContent = "リンクの情報が見つからないよ、Discordでもう一度「!push」を実行してリンクを開き直してね";
+  const code = document.getElementById("code-input").value.trim();
+  if (!/^\\d{6}$/.test(code)) {
+    statusEl.textContent = "6桁の数字コードを入力してね";
     return;
   }
   try {
@@ -181,9 +177,9 @@ async function subscribe() {
     const res = await fetch("/push/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: TOKEN, subscription: sub }),
+      body: JSON.stringify({ token: code, subscription: sub }),
     });
-    if (!res.ok) throw new Error("登録に失敗(リンクの有効期限切れかも)");
+    if (!res.ok) throw new Error("登録に失敗(コードの有効期限切れ/間違いかも)");
     statusEl.textContent = "設定できたよ、これで通知が届くはず！";
   } catch (e) {
     statusEl.textContent = "うまくいかなかった…: " + e;
@@ -215,32 +211,26 @@ self.addEventListener('notificationclick', function (event) {
 });
 """
 
-def _build_manifest(token: str) -> dict:
-    start_url = f"/push/?token={token}" if token else "/push/"
-    return {
-        "name": "宇奈月とまり",
-        "short_name": "とまり",
-        "start_url": start_url,
-        "display": "standalone",
-        "background_color": "#ffffff",
-        "theme_color": "#5865F2",
-        "icons": [
-            {"src": "/push/icon.png", "sizes": "192x192", "type": "image/png"},
-            {"src": "/push/icon.png", "sizes": "512x512", "type": "image/png"},
-        ],
-    }
+MANIFEST = {
+    "name": "宇奈月とまり",
+    "short_name": "とまり",
+    "start_url": "/push/",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#5865F2",
+    "icons": [
+        {"src": "/push/icon.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "/push/icon.png", "sizes": "512x512", "type": "image/png"},
+    ],
+}
 
 
 async def handle_subscribe_page(request: web.Request) -> web.Response:
-    # tokenはクライアント側のJS(URLパラメータ or localStorage)で解決するので、
-    # サーバー側では常に同じ静的HTMLを返すだけでよい。
     return web.Response(text=SUBSCRIBE_PAGE_HTML, content_type="text/html")
 
 
 async def handle_manifest(request: web.Request) -> web.Response:
-    token = request.query.get("token", "")
-    manifest = _build_manifest(token)
-    return web.json_response(manifest, content_type="application/manifest+json")
+    return web.json_response(MANIFEST, content_type="application/manifest+json")
 
 
 async def handle_service_worker(request: web.Request) -> web.Response:
