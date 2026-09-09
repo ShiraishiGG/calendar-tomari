@@ -20,6 +20,8 @@ import aiohttp
 from aiohttp import web
 from discord.ext import commands, tasks
 
+import web_push
+
 # ----------------------------------------------------------------------
 # 設定
 # ----------------------------------------------------------------------
@@ -44,6 +46,10 @@ REGISTER_CHANNEL_ID = int(REGISTER_CHANNEL_ID) if REGISTER_CHANNEL_ID else None
 
 # 登録成功時に元メッセージへ付与するリアクション絵文字
 CONFIRM_EMOJI = os.environ.get("CONFIRM_EMOJI", "🌙")
+
+# Web Push購読リンクを組み立てるためのベースURL(例: https://xxxx.onrender.com、末尾スラッシュ無し)。
+# !push コマンドで送るリンクの生成にのみ使う。未設定ならWeb Push機能は案内できない。
+PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL") or "").rstrip("/")
 
 # このキーワードでリプライすると、リプライ先に対応する予約をキャンセルする
 # (先頭のキーワードが確認メッセージの例文表示に使われます)
@@ -1053,6 +1059,39 @@ async def cancel_reminder(ctx: commands.Context, reminder_id: int):
     await ctx.reply(f"{reminder_id}は忘れるね")
 
 
+@bot.command(name="push")
+async def setup_push(ctx: commands.Context):
+    """スマホのブラウザ通知(Web Push)を購読するための、本人専用リンクをDMで送る。
+    Discord/LINEなどアプリの通知をOFFにしていても、このリンクを購読しておけば
+    リマインド送信時に別チャンネルとして通知が届くようになる。
+    """
+    if not web_push.is_configured():
+        await ctx.reply("まだ通知の設定が済んでないみたい、管理者に確認してね")
+        return
+    if not PUBLIC_BASE_URL:
+        await ctx.reply("URLの設定が済んでないみたい、管理者に確認してね")
+        return
+
+    token = web_push.create_subscribe_token(ctx.author.id)
+    link = f"{PUBLIC_BASE_URL}/push/?token={token}"
+
+    try:
+        await ctx.author.send(
+            "このリンクをスマホで開いて「通知を許可する」を押してね(15分だけ有効だよ)\n"
+            f"{link}\n\n"
+            "iPhoneの場合は、まずSafariで開いて共有ボタン→「ホーム画面に追加」→"
+            "ホーム画面のアイコンから開き直してから押してね"
+        )
+    except discord.Forbidden:
+        await ctx.reply(
+            "DMを送れなかった…サーバーの設定で「DMを許可する」をオンにしてからもう一度試してね"
+        )
+        return
+
+    if ctx.guild is not None:
+        await ctx.reply("DM送ったよ")
+
+
 @bot.command(name="unamoon")
 async def setup_persona(ctx: commands.Context):
     """DMで「扱い方」と「呼ばれ方」を設定する"""
@@ -1418,6 +1457,9 @@ async def reminder_loop():
             )
             phrased = await phrase_reminder_message(r["message"], r["user_id"])
             await channel.send(f"<@{r['user_id']}> {phrased}")
+            # Discordの通知をOFFにしていても気づけるよう、購読済みならWeb Pushでも通知する
+            # (未購読/未設定なら何もしない。失敗してもDiscord側の送信自体は妨げない)
+            await web_push.send_reminder_push_async(r["user_id"], phrased)
             # リマインドへの反応にも一言返せるよう、メンション会話と同じ仕組みに登録しておく
             # (元の予定内容 = 1回目の発言、送ったリマインド文 = Botの返答、として扱う)
             _register_mention_followup(
@@ -1448,6 +1490,7 @@ async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_health)
     app.router.add_get("/healthz", handle_health)
+    web_push.register_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
