@@ -21,6 +21,7 @@ from aiohttp import web
 from discord.ext import commands, tasks
 
 import web_push
+import x_post
 
 # ----------------------------------------------------------------------
 # 設定
@@ -838,6 +839,9 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+
+    # X(Twitter)自動投稿の判定(対象チャンネル・投稿者のみ。他の機能とは完全に独立)
+    await x_post.maybe_post_to_x(message)
 
     # コマンド ("!reminders" など) はコマンド処理に回す
     if message.content.startswith(COMMAND_PREFIX):
