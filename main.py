@@ -774,7 +774,7 @@ async def _dm_chat_reply(message: discord.Message, content: str) -> str:
         _persona_prompt(_user_style(message.author.id))
         + "DMで1対1の会話をしています。直近の会話の流れを踏まえて、話しかけられた内容に自然に返信してください。"
         + "説明口調やテンプレっぽい返信は避け、普段の会話のノリで返してください。"
-        + "長くなりすぎないよう1〜2文程度で。前置きや説明は付けず、返信本文だけを返してください。"
+        + "句点なし。長くなりすぎないよう1〜2文程度で。前置きや説明は付けず、返信本文だけを返してください。"
     )
     if context_text:
         user_content = f"直近の会話:\n{context_text}\n\n相手の今回の発言: {content}"
