@@ -456,6 +456,16 @@ CHAT_CHANNEL_ID = int(CHAT_CHANNEL_ID) if CHAT_CHANNEL_ID else None
 MENTION_GEMINI_PROBABILITY = float(os.environ.get("MENTION_GEMINI_PROBABILITY", "0.5"))
 MENTION_FOLLOWUP_TIMEOUT_MINUTES = int(os.environ.get("MENTION_FOLLOWUP_TIMEOUT_MINUTES", "60"))
 
+# DMでは1対1なので、メンションや挨拶キーワードに一致しなくても
+# 送られてきたメッセージには基本的に何か返す(会話継続用)。
+# 既存の予定登録/キャンセル/一覧/挨拶/メンション2ターン目の判定はすべて優先され、
+# そのどれにも当てはまらなかったDMメッセージだけがここに回ってくる。
+DM_CHAT_ENABLED = os.environ.get("DM_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+# 会話の流れを維持するため、独自の状態は持たずDiscordの実際のメッセージ履歴を都度読みにいく
+# (再起動しても履歴は消えない/実際のやり取りそのものなので言い換えによるズレも起きない)。
+DM_CHAT_CONTEXT_LIMIT = int(os.environ.get("DM_CHAT_CONTEXT_LIMIT", "20"))
+DM_CHAT_FALLBACK = "うん"
+
 MENTION_CONTENT_FALLBACK = "え？なんて？"
 MENTION_FOLLOWUP_FALLBACK = "どういたしまして"
 
@@ -754,6 +764,36 @@ async def _fetch_recent_context(
     return "\n".join(lines)
 
 
+async def _dm_chat_reply(message: discord.Message, content: str) -> str:
+    """DMでの継続会話用の一言を生成する。
+    直近の会話履歴(Discord上の実際のやり取り)を踏まえて自然に返す。
+    Gemini未設定/失敗時は固定文言にフォールバックする。
+    """
+    context_text = await _fetch_recent_context(message, limit=DM_CHAT_CONTEXT_LIMIT)
+    system_prompt = (
+        _persona_prompt(_user_style(message.author.id))
+        + "DMで1対1の会話をしています。直近の会話の流れを踏まえて、話しかけられた内容に自然に返信してください。"
+        + "説明口調やテンプレっぽい返信は避け、普段の会話のノリで返してください。"
+        + "長くなりすぎないよう1〜2文程度で。前置きや説明は付けず、返信本文だけを返してください。"
+    )
+    if context_text:
+        user_content = f"直近の会話:\n{context_text}\n\n相手の今回の発言: {content}"
+    else:
+        user_content = content
+    reply = await _call_gemini(system_prompt, user_content, max_tokens=120)
+    return reply or DM_CHAT_FALLBACK
+
+
+async def handle_dm_chat(message: discord.Message, content: str) -> None:
+    """DMで、既存のどの判定にも当てはまらなかったメッセージへの汎用会話フォールバック。"""
+    if not DM_CHAT_ENABLED or not content:
+        return
+    reply = await _dm_chat_reply(message, content)
+    await message.channel.send(reply)
+    # 独自の状態は持たず毎回Discordの実履歴を読むので、ここでは何も登録しない
+    # (次のメッセージも自動的にこのhandle_dm_chatに回ってきて、履歴込みで返信される)
+
+
 async def handle_mention_chat(message: discord.Message, content: str) -> None:
     """メンション時の会話処理をまとめて振り分ける(呼ばれただけ/内容あり)。"""
     in_chat_channel = CHAT_CHANNEL_ID is None or message.channel.id == CHAT_CHANNEL_ID
@@ -948,10 +988,12 @@ async def on_message(message: discord.Message):
         return
 
     # ここまでのどれにも当てはまらなかった場合:
-    # メンションされていれば会話処理へ、そうでなければ何もしない
-    # (判定チャンネルでの通常チャットを邪魔しないため)
+    # メンションされていれば会話処理へ。DMならメンション不要で会話フォールバックへ。
+    # それ以外(判定チャンネルでの通常チャットなど)は何もしない(邪魔しないため)。
     if mentioned:
         await handle_mention_chat(message, content)
+    elif is_dm:
+        await handle_dm_chat(message, content)
 
 
 async def cancel_by_reply(message: discord.Message):
