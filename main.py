@@ -932,8 +932,9 @@ async def on_message(message: discord.Message):
     )
     mentioned = bot.user in message.mentions
 
-    # 判定チャンネル以外では、Botへのメンションが無いメッセージは無視する
-    if not is_register_channel and not mentioned:
+    # 判定チャンネル以外では、Botへのメンションが無いメッセージは無視する。
+    # ただしDMはREGISTER_CHANNEL_IDの制限に関係なく常に会話フォールバック対象にするため素通りさせる。
+    if not is_register_channel and not mentioned and not is_dm:
         return
 
     # メンションされている場合は、本文からメンション部分を取り除いたものを判定対象にする
