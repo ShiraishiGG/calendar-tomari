@@ -208,6 +208,15 @@ document.getElementById("subscribe-btn").addEventListener("click", subscribe);
 """
 
 SERVICE_WORKER_JS = """
+// 更新されたら、古いService Workerを待たずにすぐ切り替える
+// (これが無いと、アプリを完全に閉じて開き直すまで古いコードが動き続けることがある)
+self.addEventListener('install', function (event) {
+  self.skipWaiting();
+});
+self.addEventListener('activate', function (event) {
+  event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener('push', function (event) {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) {}
@@ -337,6 +346,26 @@ def diagnose_and_send_test(user_id: int) -> str:
 async def diagnose_and_send_test_async(user_id: int) -> str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, diagnose_and_send_test, user_id)
+
+
+def get_all_subscriptions() -> dict:
+    """バックアップ用に全購読情報を返す(user_id文字列 -> [subscription, ...])。"""
+    return _subscriptions
+
+
+def import_subscription(user_id: int, subscription: dict) -> bool:
+    """!restore からの復元用。既に同じendpointの購読があれば何もしない。
+    戻り値: 新規追加できたらTrue、不正/重複でスキップしたらFalse。
+    """
+    if not isinstance(subscription, dict) or "endpoint" not in subscription:
+        return False
+    key = str(user_id)
+    subs = _subscriptions.setdefault(key, [])
+    if any(s.get("endpoint") == subscription.get("endpoint") for s in subs):
+        return False
+    subs.append(subscription)
+    save_subscriptions(_subscriptions)
+    return True
 
 
 def register_routes(app: web.Application) -> None:
