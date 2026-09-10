@@ -1094,6 +1094,18 @@ async def setup_push(ctx: commands.Context):
         await ctx.reply("DM送ったよ")
 
 
+@bot.command(name="pushtest")
+async def push_test(ctx: commands.Context):
+    """Web Pushのテスト送信を行い、結果(購読の有無/送信成功・失敗)をそのまま返信する。
+    リマインドの発火を待たずにすぐ原因切り分けができる。
+    """
+    if not web_push.is_configured():
+        await ctx.reply("VAPID鍵が未設定だよ、管理者に確認してね")
+        return
+    result = await web_push.diagnose_and_send_test_async(ctx.author.id)
+    await ctx.reply(f"```\n{result}\n```")
+
+
 @bot.command(name="unamoon")
 async def setup_persona(ctx: commands.Context):
     """DMで「扱い方」と「呼ばれ方」を設定する"""
@@ -1220,8 +1232,11 @@ BACKUP_LINE_RE = re.compile(
 # ユーザー設定(扱い方/呼ばれ方)行のフォーマット: USERPREF:user_id|style|呼び方
 USERPREF_LINE_RE = re.compile(r"^USERPREF:(\d+)\|(polite|normal|rough)\|(.*)$")
 
+# Web Push購読情報行のフォーマット: PUSHSUB:user_id|購読情報のJSON(1行1端末)
+PUSHSUB_LINE_RE = re.compile(r"^PUSHSUB:(\d+)\|(.+)$")
 
-def _format_backup_text(reminder_list: list, prefs: dict) -> str:
+
+def _format_backup_text(reminder_list: list, prefs: dict, push_subs: dict | None = None) -> str:
     lines = [
         "# リマインドバックアップ",
         f"# 出力日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M')}",
@@ -1245,6 +1260,15 @@ def _format_backup_text(reminder_list: list, prefs: dict) -> str:
         if not nickname:
             continue
         lines.append(f"USERPREF:{user_id}|{style}|{nickname}")
+
+    if push_subs:
+        lines.append("")
+        lines.append("# Web Push購読 (!pushで登録した端末。手で編集しないこと推奨)")
+        lines.append("# PUSHSUB:user_id|購読情報のJSON")
+        for user_id, subs in sorted(push_subs.items()):
+            for sub in subs:
+                sub_json = json.dumps(sub, ensure_ascii=False, separators=(",", ":"))
+                lines.append(f"PUSHSUB:{user_id}|{sub_json}")
 
     return "\n".join(lines)
 
@@ -1315,18 +1339,19 @@ async def backup_reminders(ctx: commands.Context):
     if not is_admin(ctx.author.id):
         await ctx.reply("権利ナシ！")
         return
-    if not reminders and not user_prefs:
+    if not reminders and not user_prefs and not web_push.get_all_subscriptions():
         await ctx.reply("何も無いよ")
         return
 
-    data = _format_backup_text(reminders, user_prefs)
+    data = _format_backup_text(reminders, user_prefs, web_push.get_all_subscriptions())
     buf = io.BytesIO(data.encode("utf-8"))
     filename = f"reminders_backup_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}.txt"
 
     try:
         prefs_count = sum(1 for p in user_prefs.values() if p.get("nickname"))
+        push_count = sum(len(subs) for subs in web_push.get_all_subscriptions().values())
         await ctx.author.send(
-            f"予定{len(reminders)}件・設定{prefs_count}件をバックアップしたよ。"
+            f"予定{len(reminders)}件・設定{prefs_count}件・通知購読{push_count}件をバックアップしたよ。"
             "忘れずに`!restore`してね",
             file=discord.File(buf, filename=filename),
         )
@@ -1370,6 +1395,7 @@ async def restore_reminders(ctx: commands.Context):
     added = 0
     skipped = 0
     prefs_added = 0
+    pushsub_added = 0
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -1384,6 +1410,20 @@ async def restore_reminders(ctx: commands.Context):
                 continue
             user_prefs[uid_s] = {"style": style, "nickname": nickname}
             prefs_added += 1
+            continue
+
+        pushsub_m = PUSHSUB_LINE_RE.match(line)
+        if pushsub_m:
+            uid_s, sub_json = pushsub_m.groups()
+            try:
+                sub_obj = json.loads(sub_json)
+            except (json.JSONDecodeError, ValueError):
+                skipped += 1
+                continue
+            if web_push.import_subscription(int(uid_s), sub_obj):
+                pushsub_added += 1
+            else:
+                skipped += 1
             continue
 
         m = BACKUP_LINE_RE.match(line)
@@ -1429,7 +1469,7 @@ async def restore_reminders(ctx: commands.Context):
 
     save_reminders(reminders)
     save_user_prefs()
-    msg = f"予定{added}件・設定{prefs_added}件を復元したよ"
+    msg = f"予定{added}件・設定{prefs_added}件・通知購読{pushsub_added}件を復元したよ"
     if skipped:
         msg += f"(重複/不正な{skipped}件はスキップ)"
     await ctx.reply(msg)
