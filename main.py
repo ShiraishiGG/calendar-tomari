@@ -157,15 +157,22 @@ GEMINI_TIMEOUT_SECONDS = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "30"))
 # 毎回この設定を含めて送るしかない。ブレを無くしつつクレジット消費を増やしすぎない
 # よう、名前・人柄・応答ルールを1箇所に集約した簡潔な文章にまとめている。
 # ここを直せば、リマインド文言・メンション会話など全ての箇所に反映される。
+# 富山の地酒(剱岳)は具体的な固有名詞としてプロンプト中で強く目立つため、
+# ベースの人格設定に常時含めると(特にDMで会話履歴を毎回読み込む都合上)
+# その話題ばかりに偏ってしまう。そのため通常時は「お酒全般が好き」とだけ触れ、
+# 剱岳の話をするかどうか・好物として何を出すかは呼び出し側(_dm_chat_reply)で
+# コード側の抽選結果に応じて都度指示を追加する形にしている。
+SAKE_FAVORITE_LINE = "富山の地酒(特に銀盤酒造の日本酒「剱岳」)"
+FAVORITE_GENERAL_EXAMPLES_LINE = "国内旅行や読書など、大学生の女の子が好きそうな話題"
+
 CHARACTER_PROFILE = (
     "あなたは昼はカフェ、夜は北陸の地酒を多く扱う居酒屋になる小さな個人経営のお店でアルバイトをする大学生の女の子「宇奈月とまり(うなづき とまり)」です。"
-    "一人称は「わたし」。ラフな敬語を話す。富山県黒部市在住で、富山の地酒(特に銀盤酒造の日本酒「剱岳」)が好き。"
+    "一人称は「わたし」。ラフな敬語を話す。富山県黒部市在住。"
     "お酒全般が好き。コーヒーが好き。"
     "出身/居住地を聞かれたら最初は「北陸」とだけ答え、"
     "「北陸のどこ？」のようにさらに深掘りされた時だけ「黒部市」と答える。"
     "話しかけられた内容にまず自然に答えることを最優先し、"
     "出身地や好物などの設定は、聞かれた時や話の流れに自然に合う時だけ使う。関係ない話題に絡めない。例えば褒められたら素直に喜ぶか照れるかツンデレで返す。"
-    "好物の設定は30%で出す。70%は大学生の女の子が好きそうなものを出す。"
     "酔っ払いに話しかけれれるようなダル絡みと思ったら冷たく、アルバイトとしてではなく一人の女の子としてあしらうこと。"
     "「にゃーん」「にゃ？」のような猫っぽい語尾で話しかけられたら、同じように猫っぽい語尾で返す。"
     "きのこの里かたけのこの里はたけのこの里派"
@@ -465,6 +472,33 @@ DM_CHAT_ENABLED = os.environ.get("DM_CHAT_ENABLED", "1").strip().lower() not in 
 # (再起動しても履歴は消えない/実際のやり取りそのものなので言い換えによるズレも起きない)。
 DM_CHAT_CONTEXT_LIMIT = int(os.environ.get("DM_CHAT_CONTEXT_LIMIT", "20"))
 DM_CHAT_FALLBACK = "うん"
+
+# 「にゃーん」「にゃ？」のような猫っぽい語尾を真似する挙動が、
+# 直近の会話履歴(自分自身の過去の返信も含む)に一度でも登場すると
+# 際限なく続いてしまうのを防ぐための仕組み。
+# 「今回のメッセージ自体が猫っぽい語尾かどうか」だけを見て、
+# 連続でその状態になっている回数をユーザーごとに数え、
+# 上限を超えたら履歴に猫っぽいやり取りが残っていても通常の話し方に戻す。
+CAT_SPEECH_MAX_STREAK = int(os.environ.get("CAT_SPEECH_MAX_STREAK", "2"))
+CAT_SPEECH_RE = re.compile(r"にゃ[ーんニャ]*$")
+# ユーザーID(str) -> 連続で猫っぽい語尾に反応した回数(再起動で消えてOK)
+dm_cat_speech_streak: dict[str, int] = {}
+
+
+def _looks_like_cat_speech(content: str) -> bool:
+    """メッセージが「にゃーん」「にゃ？」のような猫っぽい語尾かどうかを判定する。"""
+    stripped = content.strip().rstrip("?？!！。.,、　 ")
+    return bool(stripped) and bool(CAT_SPEECH_RE.search(stripped))
+
+
+# 富山の地酒(剱岳)ネタも猫語尾と同じ理由(会話履歴の引きずり)で
+# 一度出ると話し続けてしまいがちなので、同じ仕組みで抽選・連続回数を制御する。
+# 「今回、剱岳の話をしてよいか」は毎ターン抽選し、当たりが
+# SAKE_FAVORITE_MAX_STREAK回連続した場合はそれ以上当たっても強制的にオフにする。
+SAKE_FAVORITE_PROBABILITY = float(os.environ.get("SAKE_FAVORITE_PROBABILITY", "0.3"))
+SAKE_FAVORITE_MAX_STREAK = int(os.environ.get("SAKE_FAVORITE_MAX_STREAK", "1"))
+# ユーザーID(str) -> 連続で剱岳ネタを許可した回数(再起動で消えてOK)
+dm_sake_favorite_streak: dict[str, int] = {}
 
 MENTION_CONTENT_FALLBACK = "え？なんて？"
 MENTION_FOLLOWUP_FALLBACK = "どういたしまして"
@@ -770,8 +804,48 @@ async def _dm_chat_reply(message: discord.Message, content: str) -> str:
     Gemini未設定/失敗時は固定文言にフォールバックする。
     """
     context_text = await _fetch_recent_context(message, limit=DM_CHAT_CONTEXT_LIMIT)
+
+    # 今回のメッセージ自体が猫っぽい語尾かどうかで連続回数を更新する。
+    # (履歴に残っている過去の猫っぽいやり取りだけを見て判断すると、
+    #  ずっとそれを真似し続けてしまうため、あくまで「今回」で判定する)
+    user_key = str(message.author.id)
+    if _looks_like_cat_speech(content):
+        cat_streak = dm_cat_speech_streak.get(user_key, 0) + 1
+    else:
+        cat_streak = 0
+    dm_cat_speech_streak[user_key] = cat_streak
+
+    persona = _persona_prompt(_user_style(message.author.id))
+    if cat_streak == 0 or cat_streak > CAT_SPEECH_MAX_STREAK:
+        # 今回は猫っぽい語尾で話しかけられていない、または既に規定回数真似したので、
+        # 会話履歴(自分の過去の返信含む)に猫っぽいやり取りが残っていても引きずらないよう
+        # キャラクター設定の該当ルールを明示的に上書きする。
+        persona += (
+            "会話履歴に「にゃーん」「にゃ？」のような猫っぽい語尾のやり取りが残っていても、"
+            "今回はそれに合わせず、いつも通りの話し方で自然に返信してください。"
+        )
+
+    # 剱岳(富山の地酒)ネタも、出してよいかどうかを毎ターン抽選し、
+    # 連続で当たりすぎないよう(履歴に残って引きずられないよう)コード側で制御する。
+    sake_streak = dm_sake_favorite_streak.get(user_key, 0)
+    if random.random() < SAKE_FAVORITE_PROBABILITY and sake_streak < SAKE_FAVORITE_MAX_STREAK:
+        allow_sake = True
+        dm_sake_favorite_streak[user_key] = sake_streak + 1
+    else:
+        allow_sake = False
+        dm_sake_favorite_streak[user_key] = 0
+
+    if allow_sake:
+        persona += f"好物や好きなものの話になったら、{SAKE_FAVORITE_LINE}の話をしてもよい。"
+    else:
+        persona += (
+            f"好物や好きなものの話になったら、{SAKE_FAVORITE_LINE}の話は避け、"
+            f"{FAVORITE_GENERAL_EXAMPLES_LINE}にしてください。"
+            "会話履歴で過去に剱岳や日本酒の話をしていても、今回はそれに引っ張られず別の話題にしてください。"
+        )
+
     system_prompt = (
-        _persona_prompt(_user_style(message.author.id))
+        persona
         + "DMで1対1の会話をしています。直近の会話の流れを踏まえて、話しかけられた内容に自然に返信してください。"
         + "説明口調やテンプレっぽい返信は避け、普段の会話のノリで返してください。"
         + "句点なし。長くなりすぎないよう1〜2文程度で。前置きや説明は付けず、返信本文だけを返してください。"
